@@ -400,8 +400,8 @@ class Paleta:
         for r in res['recomendacion']:
             self.items.append(dict(grupo='En la recomendación', titulo=r['nombre'] or r['sku'],
                                    sub=f'{r["sku"]} · {r["accion"]}' + (f' · comprar {safe_int(r["compra_sugerida_unid"])} u'
-                                                                         if r['accion'] == 'RECOMPRAR' else ''),
-                                   chip=r['urgencia'] if r['accion'] == 'RECOMPRAR' else None,
+                                                                         if r['es_compra'] else ''),
+                                   chip=r['urgencia'] if r['es_compra'] else None,
                                    go=lambda r=r: self.app.ir('recom', sku=r['sku'])))
         for h in res['historial']:
             self.items.append(dict(grupo='En el historial', titulo=h['nombre'] or h['sku'],

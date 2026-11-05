@@ -894,7 +894,7 @@ def cargar_ordenes_abiertas(carpeta):
 def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fecha_fin, log,
                            compras_raw=None, mapa_bc_a_sku=None,
                            horizonte_semanas_override=None, stock_en_transito=None,
-                           lead_time_dias=None, params=None):
+                           lead_time_dias=None, params=None, plantilla=None):
     """Calcula ROP, nivel objetivo y cantidad a pedir por SKU.
 
     Stock de seguridad (SS) = z · σ de la demanda del horizonte (revisión + lead time).
@@ -984,13 +984,29 @@ def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fec
     df['limite_sanidad'] = df['venta_semanal_maxima_historica'].fillna(0) * 25
     df['revisar_antes_de_comprar'] = (df['compra_sugerida_unid'] > df['limite_sanidad']) & (df['compra_sugerida_unid'] > 50)
 
-    # --- Clasificar acción (7 categorías) ---
-    acciones = df.apply(_clasificar_accion, axis=1, result_type='expand')
-    acciones.columns = ['accion', 'motivo_accion']
-    df = pd.concat([df, acciones], axis=1)
+    # --- Variables para las reglas de acción (Fase 5) ---
+    recientes = panel_full[panel_full['semana_inicio'] > (fecha_fin - pd.Timedelta(weeks=4))]
+    df = df.merge(recientes.groupby('sku')['unidades_venta_neta'].mean().rename('venta_sem_reciente'),
+                  on='sku', how='left')
+    df['venta_sem_reciente'] = df['venta_sem_reciente'].fillna(0.0)
+    con_venta = panel_full[panel_full['unidades_venta_neta'] > 0]
+    ultima = con_venta.groupby('sku')['semana_inicio'].max()
+    # días desde la última semana con venta; NaN si nunca vendió (sin evidencia, no se descontinúa)
+    df['dias_sin_venta'] = df['sku'].map((pd.Timestamp(fecha_fin) - ultima).dt.days.clip(lower=0))
 
-    # Mantener 'decision' por retrocompatibilidad
-    df['decision'] = np.where(df['accion'] == 'RECOMPRAR', 'COMPRAR', 'NO COMPRAR')
+    # --- Clasificar acción ---
+    if plantilla is not None:
+        # Fase 5: reglas de la plantilla de categorías configurada
+        from preve_reglas import clasificar
+        acciones = clasificar(df, plantilla, horizonte_dias=horizonte_dias, lead_time_dias=lead_time_dias)
+        df = pd.concat([df, acciones], axis=1)
+        df['decision'] = np.where(df['es_compra'], 'COMPRAR', 'NO COMPRAR')
+        df = df.drop(columns='es_compra')
+    else:
+        acciones = df.apply(_clasificar_accion, axis=1, result_type='expand')
+        acciones.columns = ['accion', 'motivo_accion']
+        df = pd.concat([df, acciones], axis=1)
+        df['decision'] = np.where(df['accion'] == 'RECOMPRAR', 'COMPRAR', 'NO COMPRAR')
 
     # --- Proveedor principal (si se pasaron los datos de compras) ---
     if compras_raw is not None and mapa_bc_a_sku is not None:
@@ -1001,6 +1017,6 @@ def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fec
 
     resumen_acciones = df['accion'].value_counts().to_dict()
     log('Acciones: ' + ' | '.join(f'{k}: {v}' for k, v in sorted(resumen_acciones.items())))
-    log(f'Inversión sugerida (RECOMPRAR): S/ {df.loc[df.accion=="RECOMPRAR", "costo_total_compra_pen"].sum():,.0f} | '
+    log(f'Inversión sugerida (compras): S/ {df.loc[df.decision == "COMPRAR", "costo_total_compra_pen"].sum():,.0f} | '
         f'A revisar manualmente: {df.revisar_antes_de_comprar.sum()}')
     return df.sort_values('costo_total_compra_pen', ascending=False)

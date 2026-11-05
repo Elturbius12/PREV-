@@ -2,6 +2,35 @@
 
 Todos los cambios relevantes de PREVÉ, organizados por fase.
 
+## [Fase 5] — 2026-11-05 · Plantillas de categorías + editor visual
+
+### Agregado
+- `preve_reglas.py`: motor de reglas **sin `eval`**. Las reglas son listas cerradas de variables (14), operadores (6) y números, o "otra variable × factor"; gana la primera regla que se cumple. También incluye validación con mensajes claros, motivos con los valores reales y la vista previa de conteos por acción.
+- `seeds/plantillas_categorias.py`: plantillas RETAIL (predeterminada, según la especificación), RETAIL_CLASICO (la lógica anterior: coincide en los 2.067 productos reales y en 3.000 casos aleatorios), MANUFACTURA y DISTRIBUCION. Se siembran al iniciar sin pisar las editadas. FARMACIA queda pendiente (requiere vencimientos por lote).
+- Variables nuevas en la recomendación: `venta_sem_reciente` (promedio de las últimas 4 semanas), `dias_sin_venta` y `regla_aplicada`.
+- `preve_editor_plantillas.py`: editor visual (acción, descripción, condiciones con listas desplegables, orden ↑↓, acción por defecto y acciones de compra) con vista previa sobre los datos actuales y diferencia frente a lo guardado. Las plantillas del sistema se guardan como copia.
+- Tarjeta "Categorías de acción" en Configuración: plantillas con su descripción, reglas, conteos con tus datos y botón para activarlas.
+- `tests/test_fase5.py` (33 tests).
+
+### Cambiado
+- Cada plantilla define sus `acciones_de_compra`. El pipeline marca `decision = COMPRAR` y la interfaz, el historial, el Excel, las notas de compra, el dashboard y el informe usan esa columna en vez de `accion == 'RECOMPRAR'`.
+- **5.2 NEGOCIAR unificado** en margen < 10%: plantillas, simulación (antes < −5%) e informe (el texto sale de la regla).
+- La simulación reclasifica con la misma plantilla que el pipeline.
+
+### Corregido
+- **Bug introducido en la Fase 1:** la simulación calculaba la compra como `rop − stock`, pero desde la Fase 1 `rop` es el punto de reorden y no el nivel objetivo, así que un escenario sin cambios no reproducía la recomendación. Ahora usa nivel objetivo − stock − tránsito (test de regresión incluido).
+
+### Impacto medido con datos reales (RETAIL frente a RETAIL_CLASICO)
+| | Clásico | RETAIL |
+|---|---|---|
+| RECOMPRAR (internacional) | 651 | 530 |
+| Inversión internacional | S/ 753.747 | S/ 461.544 (−39%) |
+| DESCONTINUAR (sin venta ≥ 180 d) | — | 353 |
+| MANTENER | — | 727 |
+| Inversión local | S/ 115.606 | S/ 46.514 |
+
+**Hueco detectado en las reglas RETAIL:** 59 productos con stock menor al lead time no cumplen ninguna regla (por ejemplo, margen ≤ 0 sin ser clase A) y caen en MANTENER por defecto.
+
 ## [Fase 4] — 2026-11-05 · Importación flexible + Negosy como plugin
 
 ### Agregado
@@ -14,7 +43,7 @@ Todos los cambios relevantes de PREVÉ, organizados por fase.
 - `preve_importador_ui.py`: ventana con **arrastrar y soltar** columnas a campos (o clic + clic), perfiles guardables, formato de fecha, sucursal por defecto y vista previa de las filas convertidas con el conteo de errores.
 - Perfiles de importación en la base (tabla `perfiles_importacion`, migración 002).
 - `plugins/`: clase abstracta `PluginERP` (`plugins/base.py`) y registro dinámico (`@registrar` + descubrimiento de subpaquetes). Si un plugin no carga, la app sigue funcionando.
-- `plugins/negosy/`: `NegosyPlugin` con el extractor, movido con `git mv` para conservar su historial. Las credenciales salen del `.env` y cada descarga queda en su subcarpeta con fecha y hora.
+- `plugins/negosy/`: `NegosyPlugin` con el extractor. *Corrección:* como `preve_extractor.py` sigue existiendo como alias, git lo registra como archivo nuevo; el historial anterior se consulta en `preve_extractor.py`. Las credenciales salen del `.env` y cada descarga queda en su subcarpeta con fecha y hora.
 - Interfaz: tarjeta "Otras fuentes de datos" en Generar (importar archivo y, si hay plugin, "Descargar desde Negosy"). Tarjeta "Integración con tu ERP" en Configuración (por defecto ninguna: solo importación manual).
 - `tests/test_fase4.py` (23 tests).
 

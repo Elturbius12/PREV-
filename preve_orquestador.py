@@ -44,6 +44,9 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
     principal = conf.ciclo_principal
     secundarios = conf.ciclos[1:]
     params = conf.parametros_modelo(sucursal, principal)
+    # Fase 5: categorías de acción según la plantilla configurada
+    from preve_reglas import cargar_plantilla
+    plantilla = cargar_plantilla(conf.get('plantilla_categorias'))
     nombre_p = principal['nombre'].upper()
 
     # ── Ciclo: vista previa (se confirma recién al terminar con éxito) ──
@@ -54,6 +57,8 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
     etiqueta = info_ciclo['etiqueta']
     progreso(resumen_ciclo_texto(info_ciclo))
 
+    if plantilla:
+        progreso(f'Plantilla de categorías de acción: {plantilla["nombre"]}')
     progreso('Paso 1/7 — Cargando tus reportes del ERP...')
     listado, ventas, compras, movimientos = cargar_datos(carpeta_entrada, progreso)
     ventas = aplicar_mapeo_ventas(ventas, conf.get('mapeo_columnas_ventas'), progreso)
@@ -103,7 +108,7 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
     progreso(f'Paso 6/7 — Reporte {nombre_p} ({etiqueta}): calculando compras a {hz_p} días...')
     rec_int = calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fecha_fin, progreso,
                                      compras_raw=compras, mapa_bc_a_sku=mapa_bc_a_sku,
-                                     stock_en_transito=transito, params=params)
+                                     stock_en_transito=transito, params=params, plantilla=plantilla)
 
     progreso(f'Generando archivos del reporte {nombre_p.lower()} ({etiqueta})...')
     info_ciclo['ciclo_nombre'] = principal['nombre']
@@ -129,7 +134,8 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
         rec_sec = calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fecha_fin, progreso,
                                          compras_raw=compras, mapa_bc_a_sku=mapa_bc_a_sku,
                                          horizonte_semanas_override=hz / 7.0, stock_en_transito=transito,
-                                         lead_time_dias=ciclo['lead_time_dias'], params=params)
+                                         lead_time_dias=ciclo['lead_time_dias'], params=params,
+                                         plantilla=plantilla)
         nota, csv = _archivos_ciclo_secundario(ciclo['nombre'])
         _generar_notas_compra_proveedor(rec_sec, carpeta_salida, progreso,
                                         etiqueta=ciclo['nombre'].upper(), nombre_archivo=nota)
@@ -439,11 +445,13 @@ def ejecutar_simulacion(carpeta_salida, escenario, progreso=print):
 
     rec = pd.read_csv(csv_rec)
     # FIX (Fase 3): lead time, horizonte y Z actuales desde la configuración (antes 36 / 141 fijos)
+    from preve_reglas import cargar_plantilla
     conf = Config.actual()
     principal = conf.ciclo_principal
     resultado = simular(rec, escenario, log=progreso, lead_time_actual=principal['lead_time_dias'],
                         horizonte_actual=principal['horizonte_pronostico_dias'],
-                        z_actual=conf.get('z_nivel_servicio'))
+                        z_actual=conf.get('z_nivel_servicio'),
+                        plantilla=cargar_plantilla(conf.get('plantilla_categorias')))
     generar_excel_simulacion(resultado, carpeta_salida, log=progreso)
     return resultado
 
@@ -601,6 +609,14 @@ def _generar_excel(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_cic
             'PUBLICITAR': ('D9D2E9', '351C75'),  # morado
             'NEGOCIAR':   ('FCE5CD', '783F04'),  # naranja
             'TRASLADAR':  ('D0E0E3', '0C343D'),  # teal
+            'MANTENER':   ('D9EAD3', '274E13'),
+            'DESCONTINUAR': ('E7E6E6', '3A3838'),
+            'REPONER':    ('C6EFCE', '006100'),
+            'REABASTECER': ('C6EFCE', '006100'),
+            'PRODUCIR_MAS': ('C6EFCE', '006100'),
+            'PROMOCIONAR': ('D9D2E9', '351C75'),
+            'TRANSFERIR_SUCURSAL': ('D0E0E3', '0C343D'),
+            'SUSTITUIR': ('FCE5CD', '783F04'),
         }
         for accion, (bg, fg) in colores_accion.items():
             ws.conditional_formatting.add(rng, CellIsRule(
@@ -618,14 +634,16 @@ def _generar_excel(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_cic
         ('SKU evaluados con pronóstico', len(df2)),
     ]
     if accion_col:
-        for accion in ['RECOMPRAR', 'VIGILAR', 'REDUCIR', 'LIQUIDAR', 'PUBLICITAR', 'NEGOCIAR', 'TRASLADAR']:
+        # FIX (Fase 5): las acciones dependen de la plantilla; se listan las que aparecen
+        for accion in df2[accion_col].value_counts().index:
             n = int((df2[accion_col] == accion).sum())
             if n > 0:
                 resumen.append((f'  → {accion}', n))
     inversion = round(float(df2['Inversion total (S/)'].sum()), 2) if 'Inversion total (S/)' in df2.columns else 0
     resumen += [
-        ('Inversión total sugerida (S/) [solo RECOMPRAR]',
-         round(float(df2.loc[df2.get(accion_col, pd.Series()) == 'RECOMPRAR', 'Inversion total (S/)'].sum()), 2) if accion_col else inversion),
+        ('Inversión total sugerida (S/) [solo acciones de compra]',
+         round(float(df.loc[df['decision'] == 'COMPRAR', 'costo_total_compra_pen'].sum()), 2)
+         if 'decision' in df.columns else inversion),
         ('SKU a REVISAR antes de comprar', int(df2['REVISAR ANTES DE COMPRAR'].sum()) if 'REVISAR ANTES DE COMPRAR' in df2.columns else 0),
         ('SKU SIN pronóstico (datos insuficientes)', len(sin_pron)),
         ('Proveedores distintos', int(df2['Proveedor principal'].nunique()) if 'Proveedor principal' in df2.columns else 0),
@@ -670,9 +688,9 @@ def _generar_notas_compra_proveedor(df, carpeta_salida, log, etiqueta='FINAL',
     from openpyxl.utils import get_column_letter
 
     ORANGE = '2D7D5F'   # acento verde salvia; el naranja de Yuju queda solo como banda del header de la app
-    comprar = df[df['accion'] == 'RECOMPRAR'].copy()
+    comprar = df[df['decision'] == 'COMPRAR'].copy()     # FIX (Fase 5): acción de compra de la plantilla
     if comprar.empty or 'proveedor_principal' not in comprar.columns:
-        log('No hay productos para RECOMPRAR o sin datos de proveedor — se omite nota de compra.')
+        log('No hay productos para comprar o sin datos de proveedor — se omite nota de compra.')
         return
 
     comprar['proveedor_principal'] = comprar['proveedor_principal'].fillna('SIN PROVEEDOR')
@@ -788,7 +806,7 @@ def _generar_dashboard(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info
     # Conteo por acción
     acciones_conteo = {}
     if 'accion' in df.columns:
-        for acc in ['RECOMPRAR', 'VIGILAR', 'REDUCIR', 'LIQUIDAR', 'PUBLICITAR', 'NEGOCIAR', 'TRASLADAR']:
+        for acc in df['accion'].value_counts().index:
             n = int((df['accion'] == acc).sum())
             if n > 0:
                 acciones_conteo[acc.lower()] = n
@@ -799,7 +817,7 @@ def _generar_dashboard(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info
             'total': len(df),
             'comprar': int((df['decision'] == 'COMPRAR').sum()),
             'no_comprar': int((df['decision'] == 'NO COMPRAR').sum()),
-            'inversion': float(df.loc[df.get('accion', pd.Series()) == 'RECOMPRAR', 'costo_total_compra_pen'].sum()) if 'accion' in df.columns else float(df['costo_total_compra_pen'].sum()),
+            'inversion': float(df.loc[df['decision'] == 'COMPRAR', 'costo_total_compra_pen'].sum()),
             'revisar': int(df['revisar_antes_de_comprar'].sum()),
             'incompleto': int(df['dato_incompleto'].sum()),
             'sin_pronostico': len(sin_pron),

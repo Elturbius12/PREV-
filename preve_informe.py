@@ -49,6 +49,19 @@ DESC_ACCION = {
 }
 
 
+def descripciones_acciones():
+    """{acción: qué significa} según la plantilla en uso (Fase 5); DESC_ACCION si no hay plantilla."""
+    from preve_reglas import cargar_plantilla
+    p = cargar_plantilla(dt.Config.actual().get('plantilla_categorias'))
+    if not p:
+        return dict(DESC_ACCION)
+    desc = {}
+    for r in p['reglas']:
+        desc.setdefault(r['accion'], (r.get('descripcion') or '') + '.')
+    desc.setdefault(p['accion_por_defecto'], p.get('motivo_por_defecto', ''))
+    return desc
+
+
 # ══════════════════════════════════════════════════════════════════
 # 1) Contenido
 # ══════════════════════════════════════════════════════════════════
@@ -208,7 +221,9 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None):
                    f'{fmt_soles(k["capital_muerto"])}.')
     n_neg = int((df['accion'] == 'NEGOCIAR').sum())
     if n_neg:
-        dec.append(f'Renegociar precio con proveedores de {n_neg:,} productos de alta rotación y margen bajo (<10%).')
+        # FIX (Fase 5.2): el criterio de NEGOCIAR sale de la plantilla (antes "<10%" fijo en el texto)
+        criterio = descripciones_acciones().get('NEGOCIAR', 'alta rotación y margen bajo').rstrip('.').lower()
+        dec.append(f'Renegociar precio con proveedores de {n_neg:,} productos ({criterio}).')
     if ci and not ci['vencido']:
         dec.append(f'Tener presente la fecha límite del pedido internacional: {fecha_larga(ci["limite"])} '
                    f'(faltan {ci["dias_restantes"]} días).')
@@ -273,7 +288,7 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None):
     if 'acciones' in graf:
         B.append(('img', graf['acciones'], 15.0))
     filas = []
-    for a, desc in DESC_ACCION.items():
+    for a, desc in descripciones_acciones().items():
         n = int((df['accion'] == a).sum())
         if n:
             filas.append([a.capitalize(), f'{n:,}', desc])

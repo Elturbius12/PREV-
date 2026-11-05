@@ -907,9 +907,12 @@ class Database:
         info = info_ciclo or {}
         rec = recomendacion
         tiene_accion = 'accion' in rec.columns
-        n_recomprar = int((rec['accion'] == 'RECOMPRAR').sum()) if tiene_accion else 0
+        # Fase 5: compra = columna 'decision' (la acción de compra depende de la plantilla)
+        compra = (rec['decision'].astype(str) == 'COMPRAR') if 'decision' in rec.columns else (
+            rec['accion'] == 'RECOMPRAR' if tiene_accion else pd.Series(False, index=rec.index))
+        n_recomprar = int(compra.sum()) if tiene_accion else 0
         costo = rec['costo_total_compra_pen'] if 'costo_total_compra_pen' in rec.columns else pd.Series(0.0, index=rec.index)
-        inversion = float(costo[rec['accion'] == 'RECOMPRAR'].sum() if tiene_accion else costo.sum())
+        inversion = float(costo[compra].sum() if tiene_accion else costo.sum())
         agr = (scorecard or {}).get('agregadas', {})
         mapa = self.guardar_productos(rec[[c for c in ('sku', 'nombre', 'categoria', 'precio_regular_pen',
                                                        'modelo_asignado', 'segmento') if c in rec.columns]])

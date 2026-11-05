@@ -155,6 +155,13 @@ _NUM = ['stock_actual', 'demanda_p50_141d', 'demanda_p10_141d', 'demanda_p90_141
         'tendencia_venta']
 
 
+def es_compra(df):
+    """Serie booleana: la acción del producto implica comprar (columna 'decision' del pipeline)."""
+    if 'decision' in df.columns:
+        return df['decision'].astype(str).str.upper() == 'COMPRAR'
+    return df['accion'] == 'RECOMPRAR'          # CSV de versiones muy antiguas
+
+
 def derivar(df, lead=None):
     lead = lead_time() if lead is None else lead
     d = df.copy()
@@ -175,7 +182,9 @@ def derivar(df, lead=None):
     stock_pos = d['stock_actual'].clip(lower=0)
     d['dias_stock'] = np.where(venta_dia > 0, stock_pos / venta_dia.replace(0, np.nan), np.inf)
 
-    comprar = d['accion'] == 'RECOMPRAR'
+    # FIX (Fase 5): la acción de compra depende de la plantilla (RECOMPRAR, REPONER, REABASTECER…)
+    comprar = es_compra(d)
+    d['es_compra'] = comprar
     d['urgencia'] = np.where(comprar & (d['dias_stock'] <= lead), 'URGENTE',
                              np.where(comprar, 'PRONTO', 'MONITOREAR'))
     d['urgencia_ord'] = d['urgencia'].map({'URGENTE': 0, 'PRONTO': 1, 'MONITOREAR': 2})
@@ -215,7 +224,7 @@ def explicar(r, fecha_datos, lead=None):
     sem = None if np.isinf(dias) else dias / 7.0
     cant = int(r['compra_sugerida_unid']) if pd.notna(r['compra_sugerida_unid']) else 0
 
-    if r['accion'] == 'RECOMPRAR':
+    if r.get('es_compra', r['accion'] == 'RECOMPRAR'):
         stock_t = ('ya no tienes stock' if r['stock_actual'] <= 0
                    else f'tienes stock para {semanas_texto(sem)}')
         txt = (f'Recomiendo comprar {cant:,} unidades porque: vendes ~{venta_t} por semana, '
@@ -322,7 +331,7 @@ class Datos:
 
     # ── vistas de la tabla ─────────────────────────────────
     def recompras(self):
-        return self.df[self.df['accion'] == 'RECOMPRAR'] if self.tiene_datos else pd.DataFrame()
+        return self.df[self.df['es_compra']] if self.tiene_datos else pd.DataFrame()
 
     def pendientes(self):
         r = self.recompras()

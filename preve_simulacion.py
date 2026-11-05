@@ -17,7 +17,7 @@ import numpy as np
 
 
 def simular(recomendacion, escenario, log=print, lead_time_actual=36, horizonte_actual=141,
-            z_actual=None):
+            z_actual=None, plantilla=None):
     """Aplica un escenario what-if a una recomendación existente.
 
     Args:
@@ -34,6 +34,7 @@ def simular(recomendacion, escenario, log=print, lead_time_actual=36, horizonte_
         log: función de progreso.
         lead_time_actual / horizonte_actual / z_actual: valores con los que se calculó la recomendación
             (vienen de la configuración; por defecto los originales 36 / 141 / Z de Yuju).
+        plantilla: plantilla de categorías (preve_reglas) para reclasificar; None = lógica simplificada.
 
     Returns:
         dict con:
@@ -115,10 +116,20 @@ def simular(recomendacion, escenario, log=print, lead_time_actual=36, horizonte_
                 df.loc[mask, 'stock_seguridad'] = df.loc[mask, 'stock_seguridad'] * (z_new / z_old)
         log(f'  Niveles de servicio ajustados: {z_override}')
 
-    # ── Recalcular ROP y compra sugerida ──
+    # ── Recalcular ROP, nivel objetivo y compra sugerida ──
+    # FIX (Fase 5): mismas fórmulas que el pipeline desde la Fase 1. Antes la compra era rop − stock, pero
+    # "rop" ya es el punto de reorden (no el nivel objetivo): un escenario sin cambios no reproducía la
+    # recomendación. Además se descuenta el stock en tránsito.
+    hz_sim = float(horizonte_dias or horizonte_actual)
+    lt_sim = float(lead_time or lead_time_actual)
     if 'stock_seguridad' in df.columns:
-        df['rop'] = df['demanda_p50_141d'] + df['stock_seguridad']
-    df['compra_sugerida_unid'] = (df['rop'] - df['stock_actual']).clip(lower=0).round(0)
+        df['nivel_objetivo'] = df['demanda_p50_141d'] + df['stock_seguridad']
+        df['demanda_lead_time'] = df['demanda_p50_141d'] * lt_sim / hz_sim
+        df['rop'] = df['demanda_lead_time'] + df['stock_seguridad'] * np.sqrt(min(1.0, lt_sim / hz_sim))
+    objetivo = df['nivel_objetivo'] if 'nivel_objetivo' in df.columns else df['rop']
+    transito = df['stock_en_transito'].fillna(0) if 'stock_en_transito' in df.columns else 0.0
+    df['compra_sugerida_unid'] = (objetivo - df['stock_actual'] - transito).clip(lower=0).round(0)
+    df['cantidad_a_pedir'] = df['compra_sugerida_unid']
 
     # ── Ajustar costos ──
     factor_costo = escenario.get('factor_costo', 1.0)
@@ -130,7 +141,13 @@ def simular(recomendacion, escenario, log=print, lead_time_actual=36, horizonte_
         df['costo_total_compra_pen'] = df['compra_sugerida_unid'] * df['costo_puesto_almacen_pen']
 
     # ── Reclasificar acciones ──
-    if 'accion' in df.columns:
+    # FIX (Fase 5): con la MISMA plantilla de reglas que el pipeline (antes otra lógica distinta, M4/M3)
+    if plantilla is not None:
+        from preve_reglas import clasificar
+        res = clasificar(df, plantilla, horizonte_dias=hz_sim, lead_time_dias=lt_sim)
+        df['accion'], df['motivo_accion'] = res['accion'], res['motivo_accion']
+        df['decision'] = np.where(res['es_compra'], 'COMPRAR', 'NO COMPRAR')
+    elif 'accion' in df.columns:
         df['accion'] = df.apply(_reclasificar_accion, axis=1)
 
     # ── Comparación ──
@@ -193,7 +210,9 @@ def _reclasificar_accion(row):
 
     if demanda <= 0 and stock > 0:
         return 'LIQUIDAR'
-    if compra > 0 and margen < -0.05:
+    # FIX (Fase 5.2): NEGOCIAR unificado con las plantillas (margen menor al 10%; antes < -5%)
+    from seeds.plantillas_categorias import UMBRAL_NEGOCIAR
+    if compra > 0 and 0 < margen < UMBRAL_NEGOCIAR:
         return 'NEGOCIAR'
     if compra > 0:
         return 'RECOMPRAR'

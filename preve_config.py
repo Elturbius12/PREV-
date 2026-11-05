@@ -49,7 +49,7 @@ DEFAULTS = {
     'mapeo_columnas_ventas': ({'fecha': 'FECHA/HORA', 'codigo_barras': 'CÓDIGO DE BARRA', 'producto': 'PRODUCTO',
                                'cantidad': 'CANTIDAD', 'precio': 'PRECIO X UNIDAD', 'sucursal': 'ALMACÉN'}, 'json',
                               'Qué columna del Excel de ventas corresponde a cada campo de PREVÉ.'),
-    'plantilla_categorias': ('RETAIL', 'string', 'Plantilla de categorías de acción en uso.'),
+    'plantilla_categorias': ('RETAIL', 'string', 'Plantilla de categorías de acción en uso (ver seeds/).'),
     'plugin_erp': ('', 'string', 'Integración con ERP activa (vacío = solo importación manual).'),
     'plugin_opciones': ({}, 'json', 'Opciones del plugin de ERP, p. ej. {"tiendas": ["san_jose"]}.'),
     'perfil_importacion': ('', 'string', 'Último perfil de importación manual usado.'),
@@ -166,6 +166,8 @@ class Config:
         """Primera vez: importa preve_config.json si existe; si no, crea ciclos por defecto."""
         if not self.db.get_config(_CLAVE_JSON_MIGRADO) and os.path.exists(RUTA_CONFIG_JSON):
             self._importar_json_legado(RUTA_CONFIG_JSON)
+        from seeds.plantillas_categorias import sembrar      # Fase 5: plantillas de categorías del sistema
+        sembrar(self.db)
         if self.db.listar_ciclos_compra(solo_activos=False).empty:
             for c in CICLOS_DEFECTO:
                 self.db.guardar_ciclo_compra(c['nombre'], c['duracion_dias'], c['lead_time_dias'],

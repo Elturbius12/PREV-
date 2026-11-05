@@ -28,30 +28,13 @@ CAMPOS_VENTAS = [('fecha', 'Fecha de la venta', True), ('codigo_barras', 'Códig
                  ('producto', 'Nombre del producto', False), ('cantidad', 'Cantidad vendida', True),
                  ('precio', 'Precio unitario', False), ('sucursal', 'Sucursal / almacén', False)]
 
-# Plantilla que replica las 7 acciones actuales del pipeline (las demás plantillas llegan en la Fase 5)
-PLANTILLA_RETAIL = {
-    'nombre': 'RETAIL',
-    'descripcion': 'Tienda minorista (la lógica actual de PREVÉ): RECOMPRAR, VIGILAR, REDUCIR, LIQUIDAR, '
-                   'PUBLICITAR, NEGOCIAR y TRASLADAR.',
-    'reglas': [
-        {'accion': 'VIGILAR', 'cuando': 'producto nuevo (< semanas de lanzamiento) o sin historia suficiente'},
-        {'accion': 'LIQUIDAR', 'cuando': 'sin demanda proyectada con stock, o stock > 3 × demanda del horizonte'},
-        {'accion': 'REDUCIR', 'cuando': 'stock entre 1.5 y 3 × la demanda del horizonte'},
-        {'accion': 'PUBLICITAR', 'cuando': 'tendencia < −0.3 u/sem, clase A o B y margen > 15%'},
-        {'accion': 'NEGOCIAR', 'cuando': 'clase A y margen entre 0% y 10%'},
-        {'accion': 'RECOMPRAR', 'cuando': 'stock + tránsito por debajo del nivel objetivo'},
-        {'accion': 'TRASLADAR', 'cuando': 'excedente en una sucursal que falta en otra (multi-sucursal)'},
-    ],
-}
-
-
 # ══════════════════════════════════════════════════════════════════
 # Lógica (sin interfaz)
 # ══════════════════════════════════════════════════════════════════
 def asegurar_plantillas(cfg):
-    if cfg.db.listar_plantillas_categorias().empty:
-        cfg.db.guardar_plantilla_categorias(PLANTILLA_RETAIL['nombre'], PLANTILLA_RETAIL['reglas'],
-                                            PLANTILLA_RETAIL['descripcion'], es_plantilla_sistema=True)
+    # Fase 5: las plantillas del sistema viven en seeds/plantillas_categorias.py
+    from seeds.plantillas_categorias import sembrar
+    sembrar(cfg.db)
 
 
 def estado_inicial(cfg):

@@ -431,13 +431,13 @@ class VistaRecom(Vista):
     # ── filtros ────────────────────────────────────────────
     def _mascara(self, clave, df, est):
         if clave == 'pend':
-            return (df['accion'] == 'RECOMPRAR') & (est == 'pendiente')
+            return df['es_compra'] & (est == 'pendiente')
         if clave == 'urg':
             return (df['urgencia'] == 'URGENTE') & (est == 'pendiente')
         if clave == 'pronto':
             return (df['urgencia'] == 'PRONTO') & (est == 'pendiente')
         if clave == 'mon':
-            return df['accion'] != 'RECOMPRAR'
+            return ~df['es_compra']
         if clave == 'comp':
             return est == 'comprado'
         if clave == 'posp':
@@ -535,7 +535,7 @@ class VistaRecom(Vista):
         cab = tk.Frame(cont, bg=bg)
         cab.pack(fill='x')
         self._grid_cols(cab)
-        es_compra = r['accion'] == 'RECOMPRAR'
+        es_compra = bool(r['es_compra'])
         if es_compra:
             Chip(cab, {'URGENTE': 'Urgente', 'PRONTO': 'Pronto', 'MONITOREAR': 'Monitorear'}[r['urgencia']],
                  r['urgencia']).grid(row=0, column=0, sticky='w', padx=S(8), pady=S(11))
@@ -608,7 +608,7 @@ class VistaRecom(Vista):
         label(der, f'Precisión histórica global: {prec:.0f}%' if prec is not None
               else 'Precisión histórica: aún sin validar con ventas reales', 9, color=TEXT_DIM, bg=bg,
               wraplength=S(250), justify='left').pack(anchor='w', pady=(S(2), S(10)))
-        if r['accion'] == 'RECOMPRAR':
+        if r['es_compra']:
             antes = d.previa_unidades(sku)
             ahora = safe_int(r['compra_sugerida_unid'])
             label(der, 'VS. ANÁLISIS ANTERIOR', 8, 'bold', TEXT_MUTED, bg=bg).pack(anchor='w')
@@ -620,7 +620,7 @@ class VistaRecom(Vista):
                       mono=True).pack(anchor='w')
 
         # acciones
-        if r['accion'] != 'RECOMPRAR':
+        if not r['es_compra']:
             return
         acc = tk.Frame(cont, bg=bg)
         acc.pack(fill='x', padx=S(16), pady=(0, S(14)))
@@ -1067,6 +1067,55 @@ class VistaConfig(Vista):
             label(fr, t, 10, 'bold', width=18, anchor='w').pack(side='left')
             label(fr, v, 9, color=TEXT_DIM, wraplength=S(640), justify='left').pack(side='left')
 
+    def _card_categorias(self):
+        """Fase 5: elegir plantilla de categorías, ver cuántos productos caen en cada acción y editarla."""
+        from tkinter import ttk
+        import preve_reglas as rg
+        cfg, app = dt.Config.actual(), self.app
+        plantillas = cfg.db.listar_plantillas_categorias()
+        card = Card(self.cont, padx=22, pady=18)
+        card.pack(fill='x', padx=S(PADX), pady=(0, S(12)))
+        label(card.body, 'Categorías de acción', 11, 'bold').pack(anchor='w')
+        label(card.body, 'Qué acción recomienda PREVÉ para cada producto. Gana la primera regla que se cumple.', 9,
+              color=TEXT_DIM).pack(anchor='w', pady=(0, S(8)))
+        nombres = list(plantillas['nombre']) if not plantillas.empty else []
+        var = tk.StringVar(value=cfg.get('plantilla_categorias'))
+        fila = tk.Frame(card.body, bg=SURFACE)
+        fila.pack(anchor='w')
+        cb = ttk.Combobox(fila, textvariable=var, values=nombres, state='readonly', width=26)
+        cb.pack(side='left')
+        info = tk.Frame(card.body, bg=SURFACE)
+        info.pack(fill='x', pady=(S(8), 0))
+
+        def pintar(*_):
+            self.limpiar(info)
+            p = rg.cargar_plantilla(var.get(), cfg.db)
+            if not p:
+                return
+            label(info, p.get('descripcion') or '', 9, color=TEXT_DIM, wraplength=S(700), justify='left'
+                  ).pack(anchor='w')
+            for n, r in enumerate(p['reglas'], 1):
+                label(info, f'{n}. {r["accion"]}: {rg.describir_regla(r)}', 9, mono=True, color=TEXT_DIM
+                      ).pack(anchor='w')
+            label(info, f'   sin coincidencia → {p["accion_por_defecto"]}', 9, mono=True, color=TEXT_MUTED
+                  ).pack(anchor='w')
+            if app.datos.tiene_datos:
+                cuenta = rg.vista_previa(app.datos.df, p, dt.horizonte(), dt.lead_time())
+                label(info, 'Con tus datos actuales: ' + ' · '.join(f'{a} {n:,}' for a, n in cuenta.items()), 9,
+                      'bold', ACCENT, wraplength=S(700), justify='left').pack(anchor='w', pady=(S(6), 0))
+        cb.bind('<<ComboboxSelected>>', pintar)
+
+        def usar():
+            cfg.set('plantilla_categorias', var.get())
+            app.toast(f'Plantilla {var.get()} activada. Se aplica en el próximo análisis.', 'ok')
+
+        def editar():
+            from preve_editor_plantillas import EditorPlantillas
+            EditorPlantillas(app, var.get())
+        Btn(fila, 'Usar esta plantilla', usar, 'secondary', 'sm').pack(side='left', padx=S(8))
+        Btn(fila, 'Editar reglas…', editar, 'ghost', 'sm').pack(side='left')
+        pintar()
+
     def _card_erp(self):
         """Fase 4: elegir la integración con ERP (o ninguna = solo importación manual)."""
         from tkinter import ttk
@@ -1182,6 +1231,7 @@ class VistaConfig(Vista):
                   ).pack(side='left')
 
         self._card_empresa()
+        self._card_categorias()
         self._card_erp()
         self._card_parametros()
 
