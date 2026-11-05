@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Entornos virtuales
+venv/
+.venv/
+env/
+ENV/
+
+# Secretos
+.env
+.env.*
+!.env.example
+
+# Datos reales (ventas, clientes, proveedores, reportes)
+*.xlsx
+*.xls
+*.csv
+*.db
+*.sqlite
+*.sqlite3
+!sample_data/**
+datos/
+data/
+DATA*/
+datos_negosy/
+reportes/
+exportaciones/
+resultados/
+salida/
+
+# Configuración local (contiene rutas y nombre del usuario)
+preve_config.json
+preve_extractor_config.json
+preve_estado_ciclo.json
+*_estado_ciclo.json
+
+# Playwright (sesiones, cookies)
+storage_state*.json
+state.json
+cookies*.json
+auth*.json
+playwright/.auth/
+.playwright/
+
+# Salidas generadas
+catboost_info/
+lightgbm_info/
+*.docx
+*.pdf
+*.log
+logs/
+
+# IDE / SO
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Builds
+dist/
+build/
+*.spec

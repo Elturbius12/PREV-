@@ -1,0 +1,357 @@
+<title>PREVÉ San José</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+:root{
+  --bg:#F7F8F6; --surface:#FFFFFF; --border:#DDE3DD; --card-alt:#E8EDE8;
+  --text:#1A2B23; --text-dim:#5E6F66;
+  /* "orange" = acento verde salvia (se conservan los nombres de variable del template anterior) */
+  --orange:#2D7D5F; --orange-dark:#256A50; --orange-tint:#E3F0EA; --orange-tint2:#F3F8F5;
+  --brand:#FF6B00;
+  --good:#2F7656; --good-bg:#E1F0E7;
+  --warn:#8E6119; --warn-bg:#F7EBD3;
+  --neutral:#8A978F; --neutral-bg:#E8EDE8;
+  --blue:#3B6EA5; --blue-bg:#E4ECF4;
+  --red:#B4453A; --red-bg:#F6E2DF;
+  --purple:#6B5B95; --purple-bg:#ECE8F3;
+  --teal:#2F7F86; --teal-bg:#DDEEF0;
+  --neg:#A0602A; --neg-bg:#F4E8DC;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#121815; --surface:#1A221E; --border:#2C3832; --card-alt:#232D28;
+    --text:#E6EEE9; --text-dim:#9FB0A6;
+    --orange:#5FBF98; --orange-dark:#7FD3AE; --orange-tint:#1F3329; --orange-tint2:#18241E;
+    --good:#7FD3AE; --good-bg:#1B3026;
+    --warn:#E3B661; --warn-bg:#342A14;
+    --neutral:#9FB0A6; --neutral-bg:#232D28;
+    --blue:#8DB8E3; --blue-bg:#1B2A3A;
+    --red:#EE8F85; --red-bg:#3A1D1A;
+    --purple:#B9A9E0; --purple-bg:#2A2340;
+    --teal:#7FCBD2; --teal-bg:#1A2F31;
+    --neg:#E0A06A; --neg-bg:#3A2A18;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#121815; --surface:#1A221E; --border:#2C3832; --card-alt:#232D28;
+  --text:#E6EEE9; --text-dim:#9FB0A6;
+  --orange:#5FBF98; --orange-dark:#7FD3AE; --orange-tint:#1F3329; --orange-tint2:#18241E;
+  --good:#7FD3AE; --good-bg:#1B3026; --warn:#E3B661; --warn-bg:#342A14;
+  --neutral:#9FB0A6; --neutral-bg:#232D28; --blue:#8DB8E3; --blue-bg:#1B2A3A;
+  --red:#EE8F85; --red-bg:#3A1D1A; --purple:#B9A9E0; --purple-bg:#2A2340;
+  --teal:#7FCBD2; --teal-bg:#1A2F31; --neg:#E0A06A; --neg-bg:#3A2A18;
+  color-scheme: dark;
+}
+*{box-sizing:border-box}
+html{height:100%}
+body{
+  background:var(--bg); color:var(--text);
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  margin:0; height:100%; line-height:1.45;
+}
+.mono,.num,td.sku{ font-family:'JetBrains Mono',Consolas,'SF Mono',monospace; font-variant-numeric:tabular-nums; }
+.gutter{ padding-left:max(16px, env(safe-area-inset-left,0px)); padding-right:max(16px, env(safe-area-inset-right,0px)); }
+
+/* Header blanco: el naranja de Yuju Store solo aparece como banda delgada */
+header{
+  position:sticky; top:env(safe-area-inset-top,0px); z-index:20;
+  background:var(--surface); color:var(--text);
+  border-top:4px solid var(--brand); border-bottom:1px solid var(--border);
+}
+header .inner{ padding-block:14px; display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+header h1{ font-size:1.2rem; margin:0; font-weight:800; letter-spacing:.2px; color:var(--orange); }
+header .sub{ font-size:.82rem; color:var(--text-dim); }
+header .kbd{ margin-left:auto; font-size:.72rem; color:var(--text-dim); }
+kbd{ font-family:'JetBrains Mono',Consolas,monospace; font-size:.7rem; border:1px solid var(--border); border-radius:4px; padding:1px 5px; background:var(--bg); }
+
+.kpis{ display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; padding-block:20px 6px; }
+.kpi{ background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px 16px; min-width:0; }
+.kpi .label{ font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim); font-weight:600;}
+.kpi .value{ font-size:1.3rem; white-space:nowrap; font-weight:700; font-variant-numeric:tabular-nums; margin-top:4px; font-family:'JetBrains Mono',Consolas,monospace; }
+.kpi.accent .value{ color:var(--orange); }
+.kpi.warn .value{ color:var(--warn); }
+
+main{ max-width:1500px; margin:0 auto; padding-bottom:40px; }
+
+.panel{ background:var(--surface); border:1px solid var(--border); border-radius:8px; margin-top:18px; overflow:hidden; }
+.panel-head{ padding:16px 18px; border-bottom:1px solid var(--border); display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+.panel-head h2{ font-size:1rem; margin:0; font-weight:700; }
+.note{ padding:14px 18px; font-size:.82rem; color:var(--text-dim); border-bottom:1px solid var(--border); background:var(--orange-tint2); line-height:1.9; }
+.note b{ color:var(--text); }
+
+.controls{ display:flex; gap:8px; flex-wrap:wrap; padding:14px 18px; border-bottom:1px solid var(--border); }
+input[type=search]{
+  flex:1; min-width:160px; padding:9px 12px; border-radius:6px; border:1px solid var(--border);
+  background:var(--surface); color:var(--text); font-size:.9rem; font-family:inherit;
+}
+select{
+  padding:9px 10px; border-radius:6px; border:1px solid var(--border);
+  background:var(--surface); color:var(--text); font-size:.85rem; font-family:inherit;
+}
+input[type=search]:focus, select:focus{ outline:2px solid var(--orange); outline-offset:1px; }
+
+.table-wrap{ overflow-x:auto; }
+table{ border-collapse:collapse; width:100%; font-size:.82rem; min-width:1280px; }
+thead th{
+  position:sticky; top:0; background:var(--card-alt); color:var(--text-dim); text-align:left;
+  padding:10px 12px; font-weight:600; font-size:.7rem; text-transform:uppercase; letter-spacing:.05em;
+  white-space:nowrap; cursor:pointer; user-select:none;
+}
+thead th:hover{ color:var(--text); }
+thead th .arrow{ opacity:.6; font-size:.7rem; margin-left:3px; }
+tbody td{ padding:11px 12px; border-bottom:1px solid var(--border); white-space:nowrap; }
+tbody tr:hover{ background:var(--orange-tint2); }
+tbody td.name{ white-space:normal; max-width:260px; min-width:180px; font-weight:600; }
+tbody td.explic{ white-space:normal; max-width:340px; min-width:240px; color:var(--text-dim); font-size:.78rem; line-height:1.4; }
+.num{ text-align:right; }
+
+.pill{ display:inline-block; padding:3px 10px; border-radius:999px; font-size:.7rem; font-weight:700; white-space:nowrap; }
+.pill.recomprar{ background:var(--orange-tint); color:var(--orange); }
+.pill.vigilar{ background:var(--blue-bg); color:var(--blue); }
+.pill.reducir{ background:var(--warn-bg); color:var(--warn); }
+.pill.liquidar{ background:var(--red-bg); color:var(--red); }
+.pill.publicitar{ background:var(--purple-bg); color:var(--purple); }
+.pill.negociar{ background:var(--neg-bg); color:var(--neg); }
+.pill.trasladar{ background:var(--teal-bg); color:var(--teal); }
+.pill.urgente{ background:var(--red-bg); color:var(--red); }
+.pill.pronto{ background:var(--warn-bg); color:var(--warn); }
+.pill.monitorear{ background:var(--good-bg); color:var(--good); }
+.flag{ display:inline-block; padding:2px 8px; border-radius:6px; font-size:.7rem; font-weight:700; background:var(--warn-bg); color:var(--warn); }
+
+.empty{ padding:40px 16px; text-align:center; color:var(--text-dim); }
+.empty b{ display:block; color:var(--text); font-size:1rem; margin-bottom:4px; }
+footer.foot{ text-align:center; font-size:.75rem; color:var(--text-dim); padding:20px 0 30px; }
+</style>
+
+<header>
+  <div class="inner gutter">
+    <h1>PREVÉ</h1>
+    <span class="sub" id="headerSub">Yuju Store · Sede San José — Asistente de compras inteligente</span>
+    <span class="kbd"><kbd>Ctrl</kbd> <kbd>K</kbd> buscar</span>
+  </div>
+</header>
+
+<div class="gutter" id="cicloBar" style="display:none; padding:10px 0;">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 16px;display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:.85rem;">
+    <span id="cicloLabel" style="font-weight:800;"></span>
+    <span id="cicloDia" style="color:var(--text-dim);"></span>
+    <span style="flex:1;min-width:120px;">
+      <span style="display:block;height:6px;background:var(--border);border-radius:3px;overflow:hidden;">
+        <span id="cicloProgress" style="display:block;height:100%;background:var(--orange);border-radius:3px;transition:width .3s;"></span>
+      </span>
+    </span>
+    <span id="cicloRestante" style="color:var(--text-dim);font-size:.78rem;"></span>
+  </div>
+</div>
+<main class="gutter">
+  <div class="kpis" id="kpis"></div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Detalle por producto</h2>
+      <span id="countInfo" style="font-size:.8rem;color:var(--text-dim)"></span>
+    </div>
+    <div class="note">
+      <b>7 acciones posibles:</b>
+      <span class="pill recomprar">RECOMPRAR</span> stock bajo, hay que reponer ·
+      <span class="pill vigilar">VIGILAR</span> producto nuevo, comprar con cautela ·
+      <span class="pill reducir">REDUCIR</span> sobre-stock, dejar que baje ·
+      <span class="pill liquidar">LIQUIDAR</span> stock excesivo o sin demanda ·
+      <span class="pill publicitar">PUBLICITAR</span> buen margen, demanda cayendo ·
+      <span class="pill negociar">NEGOCIAR</span> alto volumen, margen bajo ·
+      <span class="pill trasladar">TRASLADAR</span> balance entre sucursales.
+      Las filas con <span class="flag">REVISAR</span> tienen pronóstico inestable.
+    </div>
+    <div class="controls">
+      <input type="search" id="search" placeholder="Buscar por SKU, nombre, categoría o proveedor…">
+      <select id="fAccion">
+        <option value="">Acción: todas</option>
+        <option value="RECOMPRAR">RECOMPRAR</option>
+        <option value="VIGILAR">VIGILAR</option>
+        <option value="REDUCIR">REDUCIR</option>
+        <option value="LIQUIDAR">LIQUIDAR</option>
+        <option value="PUBLICITAR">PUBLICITAR</option>
+        <option value="NEGOCIAR">NEGOCIAR</option>
+        <option value="TRASLADAR">TRASLADAR</option>
+      </select>
+      <select id="fRevisar">
+        <option value="">Revisión: todas</option>
+        <option value="si">Solo marcadas REVISAR</option>
+        <option value="no">Sin marca de revisión</option>
+      </select>
+      <select id="fAbc">
+        <option value="">Clase ABC: todas</option>
+        <option value="A">Clase A</option>
+        <option value="B">Clase B</option>
+        <option value="C">Clase C</option>
+      </select>
+    </div>
+    <div class="table-wrap">
+      <table id="tbl">
+        <thead>
+          <tr>
+            <th data-k="sku">SKU</th>
+            <th data-k="nombre">Producto</th>
+            <th data-k="categoria">Categoría</th>
+            <th data-k="proveedor_principal">Proveedor</th>
+            <th data-k="clase_abc">ABC</th>
+            <th data-k="stock_actual" class="num">Stock</th>
+            <th data-k="demanda_p50_141d" class="num">Demanda 141d</th>
+            <th data-k="rop" class="num">ROP</th>
+            <th data-k="compra_sugerida_unid" class="num">Comprar</th>
+            <th data-k="costo_total_compra_pen" class="num">Inversión</th>
+            <th data-k="urgencia_ord">Prioridad</th>
+            <th data-k="accion">Acción</th>
+            <th>Motivo</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty" id="emptyMsg" hidden><b>Sin resultados</b>No hay productos con ese filtro. Prueba con otra búsqueda.</div>
+    </div>
+  </div>
+
+  <footer class="foot">PREVÉ · Generado a partir del ERP de Yuju Store San José · Horizonte: 141 días (105 revisión + 36 lead time)</footer>
+</main>
+
+<script>window.PREVE_DATA = "__PREVE_DATA_JSON__";</script>
+<script>
+let ROWS = [];
+let sortKey = 'costo_total_compra_pen', sortDir = -1;
+
+function fmt(n){ if(n===''||n==null||isNaN(n)) return '—'; return Number(n).toLocaleString('es-PE',{maximumFractionDigits:1}); }
+function fmtMoney(n){ if(n===''||n==null||isNaN(n)) return '—'; return 'S/ '+Number(n).toLocaleString('es-PE',{maximumFractionDigits:0}); }
+
+function renderKpis(r){
+  const acc = r.acciones || {};
+  const items = [
+    {l:'SKU evaluados', v:fmt(r.total), cls:''},
+    {l:'RECOMPRAR', v:fmt(acc.recomprar||0), cls:'accent'},
+    {l:'Inversión (RECOMPRAR)', v:fmtMoney(r.inversion), cls:'accent'},
+    {l:'VIGILAR', v:fmt(acc.vigilar||0), cls:''},
+    {l:'REDUCIR', v:fmt(acc.reducir||0), cls:''},
+    {l:'LIQUIDAR', v:fmt(acc.liquidar||0), cls:'warn'},
+    {l:'PUBLICITAR', v:fmt(acc.publicitar||0), cls:''},
+    {l:'NEGOCIAR', v:fmt(acc.negociar||0), cls:''},
+    {l:'A revisar', v:fmt(r.revisar), cls:'warn'},
+    {l:'Sin pronóstico', v:fmt(r.sin_pronostico), cls:'warn'},
+  ];
+  document.getElementById('kpis').innerHTML = items.map(i=>
+    `<div class="kpi ${i.cls}"><div class="label">${i.l}</div><div class="value">${i.v}</div></div>`
+  ).join('');
+}
+
+function matchesFilters(row){
+  const q = document.getElementById('search').value.trim().toLowerCase();
+  if(q){
+    const hay = (row.sku+' '+row.nombre+' '+(row.categoria||'')+' '+(row.proveedor_principal||'')).toLowerCase();
+    if(!hay.includes(q)) return false;
+  }
+  const fa = document.getElementById('fAccion').value;
+  if(fa && row.accion !== fa) return false;
+  const fr = document.getElementById('fRevisar').value;
+  const isRev = (row.revisar_antes_de_comprar===true || row.revisar_antes_de_comprar==='True' || row.revisar_antes_de_comprar==='true');
+  if(fr==='si' && !isRev) return false;
+  if(fr==='no' && isRev) return false;
+  const fc = document.getElementById('fAbc').value;
+  if(fc && row.clase_abc !== fc) return false;
+  return true;
+}
+
+const LEAD_DIAS = 36, HORIZONTE_DIAS = 141;
+function prioridad(r){
+  if(r.accion !== 'RECOMPRAR') return {ord:2, txt:'Monitorear', cls:'monitorear'};
+  const dem = Number(r.demanda_p50_141d)||0, stock = Math.max(0, Number(r.stock_actual)||0);
+  const dias = dem>0 ? stock/(dem/HORIZONTE_DIAS) : Infinity;
+  return dias <= LEAD_DIAS ? {ord:0, txt:'Urgente', cls:'urgente'} : {ord:1, txt:'Pronto', cls:'pronto'};
+}
+function prioridadChip(r){ const p = prioridad(r); return `<span class="pill ${p.cls}">${p.txt}</span>`; }
+function pillClass(a){ return (a||'').toLowerCase().replace(/[^a-z]/g,''); }
+
+function renderTable(){
+  let rows = ROWS.filter(matchesFilters);
+  rows.sort((a,b)=>{
+    let av=a[sortKey], bv=b[sortKey];
+    if(typeof av==='string'){ av=av.toLowerCase(); bv=(bv||'').toLowerCase(); return av<bv?-1*sortDir:av>bv?1*sortDir:0; }
+    av = av==null||av===''?-Infinity:Number(av); bv = bv==null||bv===''?-Infinity:Number(bv);
+    return (av-bv)*sortDir;
+  });
+  const MAX_RENDER = 1500;
+  const shown = rows.slice(0, MAX_RENDER);
+  document.getElementById('countInfo').textContent =
+    rows.length>MAX_RENDER ? `Mostrando ${MAX_RENDER} de ${rows.length} resultados` : `${rows.length} resultados`;
+
+  const tbody = document.getElementById('tbody');
+  if(shown.length===0){
+    tbody.innerHTML=''; document.getElementById('emptyMsg').hidden=false; return;
+  }
+  document.getElementById('emptyMsg').hidden=true;
+  tbody.innerHTML = shown.map(r=>{
+    const isRev = (r.revisar_antes_de_comprar===true || r.revisar_antes_de_comprar==='True' || r.revisar_antes_de_comprar==='true');
+    const accion = r.accion || r.decision || '—';
+    const motivo = r.motivo_accion || r.explicacion || '—';
+    return `<tr>
+      <td class="sku">${r.sku}</td>
+      <td class="name">${r.nombre}${isRev?' <span class="flag">REVISAR</span>':''}</td>
+      <td>${r.categoria||'—'}</td>
+      <td>${r.proveedor_principal||'—'}</td>
+      <td>${r.clase_abc||'—'}</td>
+      <td class="num mono">${fmt(r.stock_actual)}</td>
+      <td class="num mono">${fmt(r.demanda_p50_141d)}</td>
+      <td class="num mono">${fmt(r.rop)}</td>
+      <td class="num mono">${fmt(r.compra_sugerida_unid)}</td>
+      <td class="num mono">${fmtMoney(r.costo_total_compra_pen)}</td>
+      <td>${prioridadChip(r)}</td>
+      <td><span class="pill ${pillClass(accion)}">${accion}</span></td>
+      <td class="explic">${motivo}</td>
+    </tr>`;
+  }).join('');
+}
+
+document.addEventListener('keydown', e=>{
+  if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); const s=document.getElementById('search'); s.focus(); s.select(); }
+});
+document.querySelectorAll('thead th').forEach(th=>{
+  th.addEventListener('click', ()=>{
+    const k = th.dataset.k;
+    if(!k) return;
+    if(sortKey===k){ sortDir*=-1; } else { sortKey=k; sortDir = (k==='nombre'||k==='sku'||k==='categoria'||k==='proveedor_principal'||k==='modelo_asignado'||k==='accion'||k==='clase_abc') ? 1 : -1; }
+    renderTable();
+  });
+});
+['search','fAccion','fRevisar','fAbc'].forEach(id=>{
+  document.getElementById(id).addEventListener('input', renderTable);
+  document.getElementById(id).addEventListener('change', renderTable);
+});
+
+function renderCiclo(resumen){
+  const c = resumen.ciclo;
+  const et = resumen.etiqueta || '';
+  if(et) document.getElementById('headerSub').textContent =
+    `Yuju Store · Sede San José — Reporte ${et}`;
+  if(c && c.dia_ciclo){
+    const bar = document.getElementById('cicloBar');
+    bar.style.display='';
+    const pct = Math.min(100, Math.round(c.dia_ciclo / 105 * 100));
+    const colores = {PRELIMINAR:'var(--blue)',BORRADOR:'var(--warn)',FINAL:'var(--good)'};
+    document.getElementById('cicloLabel').textContent = et;
+    document.getElementById('cicloLabel').style.color = colores[et]||'var(--orange)';
+    document.getElementById('cicloDia').textContent = `Ciclo #${c.ciclo_numero||1} · Día ${c.dia_ciclo}/105 · Import. #${c.importacion_num||'?'}`;
+    document.getElementById('cicloProgress').style.width = pct+'%';
+    document.getElementById('cicloProgress').style.background = colores[et]||'var(--orange)';
+    document.getElementById('cicloRestante').textContent = `${c.dias_restantes||0} días restantes — Límite: ${c.fecha_limite_pedido||'?'}`;
+  }
+}
+
+try {
+  const d = window.PREVE_DATA;
+  ROWS = d.rows;
+  ROWS.forEach(r=>{ r.urgencia_ord = prioridad(r).ord; });
+  renderKpis(d.resumen);
+  renderCiclo(d.resumen);
+  renderTable();
+} catch(e) {
+  document.getElementById('tbody').innerHTML = '<tr><td colspan="13" class="empty">No se pudieron cargar los datos del reporte.</td></tr>';
+}
+</script>

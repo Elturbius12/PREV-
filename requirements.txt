@@ -1,0 +1,12 @@
+pandas
+numpy
+openpyxl
+lightgbm
+catboost
+statsforecast
+scikit-learn
+python-docx
+reportlab
+matplotlib
+playwright
+python-dotenv
