@@ -3,6 +3,16 @@
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def base_de_datos_aislada(tmp_path, monkeypatch):
+    """Cada test usa su propio preve.db temporal (nunca la base real de la app)."""
+    from database import Database
+    Database.cerrar_todas()
+    monkeypatch.setenv('PREVE_DB_URL', 'sqlite:///' + str(tmp_path / 'preve_test.db').replace('\\', '/'))
+    yield
+    Database.cerrar_todas()
+
+
 @pytest.fixture
 def log():
     """Logger que acumula mensajes para poder inspeccionarlos en los tests."""

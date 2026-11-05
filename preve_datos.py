@@ -13,7 +13,7 @@ del CSV; si no se puede calcular, se devuelve None y la interfaz muestra "—".
 import os
 import json
 import shutil
-import sqlite3
+from sqlalchemy.exc import SQLAlchemyError
 import datetime
 import numpy as np
 import pandas as pd
@@ -274,7 +274,7 @@ class Datos:
             # FIX: comparación y scorecard de la sucursal activa
             self.comparacion = hist.comparar_ultimas(carpeta, self.sucursal)
             self.scorecard = hist.ultimo_scorecard(carpeta, self.sucursal)
-        except sqlite3.Error:
+        except SQLAlchemyError:
             logger.exception('No se pudo leer el historial de %s', carpeta)
 
     @property
@@ -416,7 +416,7 @@ class Datos:
             res['historial'] = [h for h in hist.buscar_en_historial(self.carpeta, texto, limite + 3,
                                                                     sucursal=self.sucursal)
                                 if h['sku'] not in vistos][:limite]
-        except sqlite3.Error:
+        except SQLAlchemyError:
             # FIX: antes except Exception silencioso
             logger.exception('Búsqueda en el historial falló')
         for base in (self.carpeta, os.path.dirname(self.carpeta or '')):

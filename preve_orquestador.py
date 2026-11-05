@@ -2,7 +2,7 @@
 """Orquesta el pipeline completo y genera el Excel + dashboard finales."""
 import os
 import json
-import sqlite3
+from sqlalchemy.exc import SQLAlchemyError
 import datetime
 import pandas as pd
 
@@ -140,9 +140,16 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
     try:
         registrar_ejecucion(carpeta_salida, rec_int, info_ciclo=info_ciclo,
                             sucursal=sucursal, scorecard=scorecard_result, log=progreso)
-    except (OSError, ValueError, KeyError, sqlite3.Error) as e:
+    except (OSError, ValueError, KeyError, SQLAlchemyError) as e:
         logger.exception('No se pudo registrar la ejecución en el historial')
         progreso(f'⚠ No se pudo registrar en historial: {e}')
+
+    # ── Base de datos: ventas, stock y pronósticos acumulados (para backtesting y multi-sucursal) ──
+    try:
+        _guardar_en_base(sucursal, dim, segmentacion, ventas_diarias, stock, rec_int, fecha_datos, progreso)
+    except (OSError, ValueError, KeyError, SQLAlchemyError) as e:
+        logger.exception('No se pudieron guardar los datos en preve.db')
+        progreso(f'⚠ No se pudieron guardar los datos en la base: {e}')
 
     # ══════════════════════════════════════════════════════════════════
     # INFORME PARA GERENCIA (Word + PDF)
@@ -161,6 +168,21 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
     progreso(f'Sucursal: {sucursal}')
     progreso('═' * 60)
     return rec_int
+
+
+def _guardar_en_base(sucursal, dim, segmentacion, ventas_diarias, stock, rec, fecha_datos, log):
+    """Persiste en preve.db el catálogo, las ventas diarias, el stock actual y el pronóstico de esta corrida."""
+    from database import Database
+    db = Database.default()
+    prod = dim.merge(segmentacion[['sku', 'segmento', 'modelo_asignado']], on='sku', how='left')
+    db.guardar_productos(prod)
+    vd = ventas_diarias.assign(cantidad=-ventas_diarias['mov'])[['sku', 'fecha', 'cantidad']]
+    n_v = db.guardar_ventas(sucursal, vd)
+    n_s = db.guardar_stock_actual(sucursal, stock.loc[stock.index.max()], fecha_datos)
+    inicio = pd.Timestamp(fecha_datos) + pd.Timedelta(days=1)
+    n_p = db.guardar_pronosticos(sucursal, rec, datetime.datetime.now(), inicio,
+                                 inicio + pd.Timedelta(days=HORIZONTE_DIAS - 1))
+    log(f'Base de datos: {n_v:,} ventas diarias, {n_s:,} stocks y {n_p:,} pronósticos guardados')
 
 
 NOMBRE_CLASIFICACION = 'PREVE_Clasificacion_Productos.xlsx'

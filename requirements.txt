@@ -5,6 +5,7 @@ lightgbm
 catboost
 statsforecast
 scikit-learn
+sqlalchemy>=2.0
 python-docx
 reportlab
 matplotlib

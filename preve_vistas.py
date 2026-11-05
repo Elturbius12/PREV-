@@ -945,13 +945,13 @@ class VistaHistorial(Vista):
 
         def trabajo():
             import time
-            import sqlite3
+            from sqlalchemy.exc import SQLAlchemyError
             import preve_historial as hist
             t0 = time.time()
             try:
                 # FIX: historial filtrado por la sucursal activa
                 df = hist.ejecuciones_con_diff(carpeta, 50, sucursal=sucursal) if carpeta else pd.DataFrame()
-            except sqlite3.Error:
+            except SQLAlchemyError:
                 # FIX: antes except Exception silencioso
                 logger.exception('No se pudo leer el historial')
                 df = pd.DataFrame()

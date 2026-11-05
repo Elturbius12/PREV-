@@ -2,6 +2,22 @@
 
 Todos los cambios relevantes de PREVÉ, organizados por fase.
 
+## [Fase 2] — 2026-11-05 · Migración a SQLite con capa de abstracción
+
+### Agregado
+- `database.py`: clase `Database` sobre SQLAlchemy Core y **único lugar con SQL** del proyecto. Pasar a PostgreSQL es cambiar `PREVE_DB_URL`. Los upserts se resuelven por dialecto (SQLite o PostgreSQL).
+- Esquema versionado (`schema_version` y `MIGRACIONES`, migración 001) con las 15 tablas del plan, más `ejecuciones`, `recomendaciones` y `metricas_ejecucion` del historial. `decisiones_compra` agrega `ciclo_numero`, `razon` y `hasta`, que ya usaba la app. `ordenes_compra_abiertas` agrega un `sucursal_id` opcional.
+- `scripts/migrar_a_sqlite.py`: importa `preve_config.json`, `ciclo_estado.json`, `preve_historial.db`, los CSV de recomendación y de órdenes abiertas y, con `--con-ventas`, las ventas diarias de los Excel. Compara los conteos de origen y destino. Es idempotente y no modifica los archivos de origen.
+- El pipeline guarda en `preve.db` el catálogo, las ventas diarias, el stock actual y los pronósticos de cada corrida (base para el backtesting de la Fase 6).
+- `tests/test_database.py` (19 tests). Cada test usa su propia base temporal.
+
+### Cambiado
+- `preve_historial.py` es ahora una fachada sobre `Database` (misma API, sin SQL propio). La base es una sola, `preve.db` en la carpeta de la app. Si una carpeta de resultados tiene un `preve_historial.db` antiguo, se importa automáticamente la primera vez.
+- `requirements.txt`: `sqlalchemy>=2.0`.
+
+### Migración verificada (copia de DATA SJ)
+Todos los conteos coinciden: 2 ejecuciones, 6.252 recomendaciones, 2.004 pronósticos y stocks, 54.891 ventas diarias (233.409 u), 9 claves de configuración y 2 ciclos de compra. La carpeta original quedó intacta (verificado con checksum).
+
 ## [Fase 1] — 2026-11-05 · Corrección de bugs críticos del motor
 
 Cada corrección lleva un comentario `# FIX:` en el código y un test de regresión en `tests/test_fase1.py` (51 tests).
