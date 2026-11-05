@@ -290,14 +290,34 @@ metricas_ejecucion = Table(
 )
 
 
+perfiles_importacion = Table(
+    'perfiles_importacion', metadata,
+    Column('id', Integer, primary_key=True),
+    Column('nombre', String(100), nullable=False, unique=True),
+    Column('tipo', String(30), nullable=False, default='ventas'),
+    Column('mapeo_columnas', Text, nullable=False),          # JSON {campo: columna del archivo}
+    Column('formato_fecha', String(40)),                     # p. ej. '%d-%m-%Y %H:%M' o 'auto'
+    Column('separador', String(5)),                          # CSV/TSV; None = autodetectar
+    Column('creado_en', DateTime, default=_ahora),
+)
+
+_TABLAS_001 = [t for n, t in metadata.tables.items() if n != 'perfiles_importacion']
+
+
 def _migracion_001(conn):
     """Esquema inicial completo."""
-    metadata.create_all(conn)
+    metadata.create_all(conn, tables=_TABLAS_001)
+
+
+def _migracion_002(conn):
+    """Fase 4: perfiles de importación manual."""
+    metadata.create_all(conn, tables=[perfiles_importacion])
 
 
 # (versión, descripción, función). Agregar migraciones nuevas al final, nunca editar las anteriores.
 MIGRACIONES = [
     (1, 'Esquema inicial', _migracion_001),
+    (2, 'Perfiles de importación', _migracion_002),
 ]
 
 
@@ -798,6 +818,46 @@ class Database:
         empresa_id = empresa_id or self.empresa_por_defecto()
         return self._df(select(categorias_activas).where(categorias_activas.c.empresa_id == empresa_id)
                         .order_by(categorias_activas.c.orden))
+
+    # ── perfiles de importación ────────────────────────────
+    def guardar_perfil_importacion(self, nombre, mapeo_columnas, formato_fecha=None, separador=None, tipo='ventas'):
+        fila = {'nombre': nombre.strip(), 'tipo': tipo, 'mapeo_columnas': json.dumps(mapeo_columnas, ensure_ascii=False),
+                'formato_fecha': formato_fecha, 'separador': separador, 'creado_en': _ahora()}
+        with self.engine.begin() as conn:
+            self._upsert(conn, perfiles_importacion, [fila], ['nombre'],
+                         ['tipo', 'mapeo_columnas', 'formato_fecha', 'separador'])
+
+    def listar_perfiles_importacion(self, tipo=None):
+        q = select(perfiles_importacion)
+        if tipo:
+            q = q.where(perfiles_importacion.c.tipo == tipo)
+        df = self._df(q.order_by(perfiles_importacion.c.nombre))
+        if not df.empty:
+            df['mapeo'] = df['mapeo_columnas'].map(json.loads)
+        return df
+
+    def obtener_perfil_importacion(self, nombre):
+        with self.engine.connect() as conn:
+            f = conn.execute(select(perfiles_importacion).where(perfiles_importacion.c.nombre == nombre)).first()
+        if not f:
+            return None
+        d = dict(f._mapping)
+        d['mapeo'] = json.loads(d['mapeo_columnas'])
+        return d
+
+    def eliminar_perfil_importacion(self, nombre):
+        with self.engine.begin() as conn:
+            conn.execute(delete(perfiles_importacion).where(perfiles_importacion.c.nombre == nombre))
+
+    def productos_por_codigo(self, empresa_id=None):
+        """{código de barras o SKU: sku} para validar importaciones."""
+        p = self.obtener_productos(empresa_id)
+        mapa = {str(s): str(s) for s in p['sku']} if not p.empty else {}
+        if not p.empty:
+            for bc, sku in zip(p['codigo_barras'], p['sku']):
+                if bc and str(bc) not in mapa:
+                    mapa[str(bc)] = str(sku)
+        return mapa
 
     # ── decisiones de compra ───────────────────────────────
     def guardar_decision(self, sku, sucursal, ciclo_numero, estado, razon='', hasta=None, accion=None,

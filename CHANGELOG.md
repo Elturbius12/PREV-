@@ -2,6 +2,28 @@
 
 Todos los cambios relevantes de PREVÉ, organizados por fase.
 
+## [Fase 4] — 2026-11-05 · Importación flexible + Negosy como plugin
+
+### Agregado
+- `preve_importador.py`: importación de ventas desde cualquier sistema.
+  - Formatos xlsx, xls, csv y tsv. Detecta encabezado, separador y codificación (UTF-8 o Latin-1) y conserva los ceros a la izquierda de los códigos.
+  - Sugiere el mapeo por sinónimos y detecta el formato de fecha (día/mes, mes/día, ISO, AM/PM; desempata por días > 12).
+  - Lee números en formato regional (`1.234,5`, `S/ 3.50`).
+  - Valida fecha, cantidad, producto existente (por código de barras o SKU) y sucursal (por nombre **o** por cualquiera de sus tiendas o almacenes).
+  - Genera un reporte Excel con resumen y errores por fila. Las filas válidas se guardan en `ventas_diarias`.
+- `preve_importador_ui.py`: ventana con **arrastrar y soltar** columnas a campos (o clic + clic), perfiles guardables, formato de fecha, sucursal por defecto y vista previa de las filas convertidas con el conteo de errores.
+- Perfiles de importación en la base (tabla `perfiles_importacion`, migración 002).
+- `plugins/`: clase abstracta `PluginERP` (`plugins/base.py`) y registro dinámico (`@registrar` + descubrimiento de subpaquetes). Si un plugin no carga, la app sigue funcionando.
+- `plugins/negosy/`: `NegosyPlugin` con el extractor, movido con `git mv` para conservar su historial. Las credenciales salen del `.env` y cada descarga queda en su subcarpeta con fecha y hora.
+- Interfaz: tarjeta "Otras fuentes de datos" en Generar (importar archivo y, si hay plugin, "Descargar desde Negosy"). Tarjeta "Integración con tu ERP" en Configuración (por defecto ninguna: solo importación manual).
+- `tests/test_fase4.py` (23 tests).
+
+### Cambiado
+- `preve_extractor.py` queda como alias de `plugins/negosy/extractor.py`. Siguen funcionando `python preve_extractor.py` y `from preve_extractor import ...`.
+
+### Verificado con datos reales
+`reporte_ventas_producto_2026.xlsx` (119.039 filas): se importaron 118.983 (99,95%). Las 56 con error tienen 51 productos fuera del catálogo y 5 líneas sin código, sin fecha o sin cantidad válida. Tiempo: ~70 s, la mayor parte en leer el Excel.
+
 ## [Fase 3] — 2026-11-05 · Configuración parametrizable y asistente inicial
 
 ### Agregado

@@ -50,6 +50,9 @@ DEFAULTS = {
                                'cantidad': 'CANTIDAD', 'precio': 'PRECIO X UNIDAD', 'sucursal': 'ALMACÉN'}, 'json',
                               'Qué columna del Excel de ventas corresponde a cada campo de PREVÉ.'),
     'plantilla_categorias': ('RETAIL', 'string', 'Plantilla de categorías de acción en uso.'),
+    'plugin_erp': ('', 'string', 'Integración con ERP activa (vacío = solo importación manual).'),
+    'plugin_opciones': ({}, 'json', 'Opciones del plugin de ERP, p. ej. {"tiendas": ["san_jose"]}.'),
+    'perfil_importacion': ('', 'string', 'Último perfil de importación manual usado.'),
     'ultima_duracion_s': (None, 'float', 'Duración del último análisis (para estimar el tiempo restante).'),
     'pasos_s': (None, 'json', 'Duración de cada paso del último análisis.'),
 }

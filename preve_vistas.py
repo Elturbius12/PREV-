@@ -315,6 +315,8 @@ class VistaGenerar(Vista):
                     label(card.body, 'Faltan reportes en esta carpeta; el análisis puede fallar.', 9, color=WARN
                           ).pack(anchor='w', pady=(S(6), 0))
 
+        self._card_fuentes()
+
         lista = tk.Frame(self.cont, bg=BG)
         lista.pack(fill='x', padx=S(PADX), pady=(S(6), S(24)))
         Btn(lista, 'Generar recomendación', app.generar, 'primary', 'lg', min_width=300).pack(side='left')
@@ -322,6 +324,28 @@ class VistaGenerar(Vista):
         txt = (f'La última vez tardó {fmt_mmss(seg)}.' if seg else
                'Puede tardar varios minutos: entrena 3 modelos de pronóstico con tus datos reales.')
         label(lista, txt, 9, color=TEXT_DIM).pack(side='left', padx=(S(14), 0))
+
+    def _card_fuentes(self):
+        """Fase 4: importación manual siempre disponible; descarga automática solo si hay plugin configurado."""
+        from plugins import obtener_plugin
+        app = self.app
+        plugin = obtener_plugin(dt.Config.actual().get('plugin_erp'))
+        card = Card(self.cont, padx=20, pady=16)
+        card.pack(fill='x', padx=S(PADX), pady=(0, S(12)))
+        label(card.body, 'Otras fuentes de datos', 11, 'bold').pack(anchor='w')
+        label(card.body, 'Importa ventas de cualquier sistema (Excel o CSV) a la base de PREVÉ'
+              + (f', o descárgalas directamente desde {plugin.nombre}.' if plugin else
+                 '. Para descargar automáticamente desde tu ERP, actívalo en Configuración.'),
+              9, color=TEXT_DIM, wraplength=S(700), justify='left').pack(anchor='w', pady=(S(2), S(10)))
+        fila = tk.Frame(card.body, bg=SURFACE)
+        fila.pack(fill='x')
+        Btn(fila, 'Importar ventas desde archivo…', app.abrir_importador, 'secondary', 'md').pack(side='left')
+        if plugin:
+            Btn(fila, f'Descargar desde {plugin.nombre}', app.descargar_desde_erp, 'soft', 'md').pack(
+                side='left', padx=(S(10), 0))
+            if not plugin.credenciales_completas():
+                label(card.body, f'⚠ Faltan las credenciales de {plugin.nombre} en el archivo .env.', 9,
+                      color=WARN).pack(anchor='w', pady=(S(6), 0))
 
     def _elegir(self, clave):
         if self.app.elegir_carpeta(clave):
@@ -1043,6 +1067,34 @@ class VistaConfig(Vista):
             label(fr, t, 10, 'bold', width=18, anchor='w').pack(side='left')
             label(fr, v, 9, color=TEXT_DIM, wraplength=S(640), justify='left').pack(side='left')
 
+    def _card_erp(self):
+        """Fase 4: elegir la integración con ERP (o ninguna = solo importación manual)."""
+        from tkinter import ttk
+        from plugins import listar_plugins
+        cfg = dt.Config.actual()
+        plugins = listar_plugins()
+        card = Card(self.cont, padx=22, pady=18)
+        card.pack(fill='x', padx=S(PADX), pady=(0, S(12)))
+        label(card.body, 'Integración con tu ERP', 11, 'bold').pack(anchor='w')
+        label(card.body, 'Con una integración activa aparece "Descargar desde …" en Generar. Sin integración, '
+                         'importas los reportes a mano.', 9, color=TEXT_DIM).pack(anchor='w', pady=(0, S(8)))
+        opciones = ['Ninguna (solo importación manual)'] + [f'{p.nombre} ({k})' for k, p in plugins.items()]
+        actual = cfg.get('plugin_erp')
+        var = tk.StringVar(value=next((o for o in opciones if o.endswith(f'({actual})')), opciones[0]))
+        fila = tk.Frame(card.body, bg=SURFACE)
+        fila.pack(anchor='w')
+        ttk.Combobox(fila, textvariable=var, values=opciones, state='readonly', width=36).pack(side='left')
+
+        def guardar():
+            sel = var.get()
+            clave = sel[sel.rfind('(') + 1:-1] if sel != opciones[0] else ''
+            cfg.set('plugin_erp', clave)
+            self.app.toast('Integración guardada', 'ok')
+        Btn(fila, 'Guardar', guardar, 'secondary', 'sm').pack(side='left', padx=S(8))
+        if actual in plugins:
+            label(card.body, plugins[actual].descripcion, 9, color=TEXT_MUTED, wraplength=S(700),
+                  justify='left').pack(anchor='w', pady=(S(6), 0))
+
     def _card_parametros(self):
         import json
         cfg = dt.Config.actual()
@@ -1130,6 +1182,7 @@ class VistaConfig(Vista):
                   ).pack(side='left')
 
         self._card_empresa()
+        self._card_erp()
         self._card_parametros()
 
         card = Card(self.cont, padx=22, pady=18)

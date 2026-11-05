@@ -492,6 +492,35 @@ class PreveApp:
         if not dt.Config.actual().get('wizard_completado'):
             self.root.after(500, self.abrir_asistente)
 
+    # ── Fase 4: fuentes de datos ───────────────────────────
+    def abrir_importador(self):
+        from preve_importador_ui import VentanaImportacion
+        VentanaImportacion(self)
+
+    def descargar_desde_erp(self):
+        """Descarga los reportes con el plugin configurado dentro de la carpeta de reportes de la sucursal."""
+        from plugins import obtener_plugin
+        conf = dt.Config.actual()
+        plugin = obtener_plugin(conf.get('plugin_erp'))
+        if plugin is None:
+            self.toast('No hay una integración con ERP configurada.', 'warn')
+            return
+        destino = self.carpeta('entrada')
+        if not destino:
+            self.toast('Elige primero la carpeta de reportes del ERP.', 'warn')
+            return
+        opciones = conf.get('plugin_opciones') or {}
+        self.toast(f'Descargando desde {plugin.nombre}… puede tardar varios minutos.', 'info')
+
+        def listo(carpeta, err):
+            if err:
+                self.toast(f'No se pudo descargar desde {plugin.nombre}: {err}', 'error')
+                return
+            self.toast(f'Reportes descargados en {os.path.basename(carpeta)}. Ya puedes generar.', 'ok')
+            if self.nombre_actual == 'generar':
+                self.refrescar()
+        self.en_segundo_plano(lambda: plugin.extraer(destino, opciones, log=logger.info), listo)
+
     def abrir_asistente(self, paso=0):
         from preve_wizard import Asistente
         Asistente(self.root, al_terminar=self._config_cambiada, paso_inicial=paso)
