@@ -4,6 +4,8 @@ __pycache__/
 *.pyo
 *.egg-info/
 .pytest_cache/
+.coverage
+htmlcov/
 
 # Entornos virtuales
 venv/
@@ -21,6 +23,9 @@ ENV/
 *.xls
 *.csv
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 !sample_data/**
@@ -32,11 +37,15 @@ reportes/
 exportaciones/
 resultados/
 salida/
+datos_reales/
+reportes_generados/
+reportes_backtesting/
 
 # Configuración local (contiene rutas y nombre del usuario)
 preve_config.json
 preve_extractor_config.json
 preve_estado_ciclo.json
+ciclo_estado.json
 *_estado_ciclo.json
 
 # Playwright (sesiones, cookies)
