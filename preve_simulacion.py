@@ -16,7 +16,8 @@ import pandas as pd
 import numpy as np
 
 
-def simular(recomendacion, escenario, log=print):
+def simular(recomendacion, escenario, log=print, lead_time_actual=36, horizonte_actual=141,
+            z_actual=None):
     """Aplica un escenario what-if a una recomendación existente.
 
     Args:
@@ -31,6 +32,8 @@ def simular(recomendacion, escenario, log=print):
             - filtro_proveedores: list[str], solo simular estos proveedores.
             - nivel_servicio_override: dict {'A': z, 'B': z, 'C': z}, nuevos niveles Z.
         log: función de progreso.
+        lead_time_actual / horizonte_actual / z_actual: valores con los que se calculó la recomendación
+            (vienen de la configuración; por defecto los originales 36 / 141 / Z de Yuju).
 
     Returns:
         dict con:
@@ -72,7 +75,7 @@ def simular(recomendacion, escenario, log=print):
     # ── Ajustar horizonte ──
     horizonte_dias = escenario.get('horizonte_dias')
     if horizonte_dias:
-        ratio = horizonte_dias / 141.0
+        ratio = horizonte_dias / float(horizonte_actual)   # FIX (Fase 3): antes 141 fijo
         for col in ['demanda_p50_141d', 'demanda_p10_141d', 'demanda_p90_141d']:
             if col in df.columns:
                 # Si ya se aplicó factor_demanda, esto lo reescala al nuevo horizonte
@@ -86,7 +89,7 @@ def simular(recomendacion, escenario, log=print):
         # Recalcular stock de seguridad con nuevo lead time
         # SS = Z * σ_semanal * √(LT_semanas + R_semanas)
         # Simplificación: escalar SS proporcionalmente a la raíz del ratio de lead time
-        lt_orig = 36.0  # días originales
+        lt_orig = float(lead_time_actual)   # FIX (Fase 3): antes 36.0 fijo
         ratio_lt = np.sqrt(lead_time / lt_orig)
         df['stock_seguridad'] = df['stock_seguridad'] * ratio_lt
         log(f'  Lead time ajustado: {lead_time} días (SS escalado x{ratio_lt:.2f})')
@@ -103,9 +106,10 @@ def simular(recomendacion, escenario, log=print):
     # ── Niveles de servicio ──
     z_override = escenario.get('nivel_servicio_override')
     if z_override and 'stock_seguridad' in df.columns and 'clase_abc' in df.columns:
-        from preve_pipeline import Z_NIVEL_SERVICIO
+        from preve_config import DEFAULTS
+        z_base = z_actual or DEFAULTS['z_nivel_servicio'][0]   # FIX (Fase 3): Z configurado
         for clase, z_new in z_override.items():
-            z_old = Z_NIVEL_SERVICIO.get(clase, 1.0)
+            z_old = z_base.get(clase, 1.0)
             if z_old > 0:
                 mask = df['clase_abc'] == clase
                 df.loc[mask, 'stock_seguridad'] = df.loc[mask, 'stock_seguridad'] * (z_new / z_old)

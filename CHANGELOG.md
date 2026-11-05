@@ -2,6 +2,22 @@
 
 Todos los cambios relevantes de PREVÉ, organizados por fase.
 
+## [Fase 3] — 2026-11-05 · Configuración parametrizable y asistente inicial
+
+### Agregado
+- `preve_config.py`: clase `Config` con caché en memoria, invalidación al guardar y validación de tipos. Los valores por defecto (`DEFAULTS`, `CICLOS_DEFECTO`) son exactamente los que el código tenía fijos, así que los resultados no cambian mientras no se editen. `ParametrosModelo` agrupa lo que usa el pipeline.
+- `preve_wizard.py`: asistente de 6 pantallas (empresa, sucursales, N ciclos de compra, frecuencia, mapeo de columnas de ventas con lectura de un archivo de ejemplo, y plantilla de categorías). Se abre si `wizard_completado` es falso y viene precargado con la configuración actual. La lógica (`estado_inicial`, `validar_paso`, `guardar_asistente`) se testea sin interfaz.
+- Panel de Configuración: resumen de empresa, sucursales y ciclos (se editan con el asistente) y edición de los parámetros del modelo (Z por clase, ADI/CV², semanas de lanzamiento, frecuencia, doble descuento e hiperparámetros JSON), con guardado todo-o-nada.
+- `aplicar_mapeo_ventas()`: el Excel de ventas puede tener otros nombres de columna.
+- `tests/test_fase3.py` (19 tests).
+
+### Cambiado
+- Sin valores fijos: horizonte, lead time y duración salen de `ciclos_compra`; sucursales y almacenes de `sucursales` + `configuracion`; IGV y nombre de empresa de `empresas`; Z, umbrales ADI/CV², semanas de lanzamiento e hiperparámetros de `configuracion`. Afecta a `pipeline`, `orquestador`, `ciclo`, `simulacion` (`lt_orig`, horizonte, Z), `validacion` (IGV), `datos`, `informe`, `vistas` y `app` (título, logo, nombre por defecto).
+- **N ciclos de compra:** el de mayor horizonte es el principal (reporte completo y etiquetas). Cada ciclo adicional genera sus notas de compra; "Local" conserva sus nombres de archivo.
+- **Sucursales unificadas (A10, A11):** una sola lista (San José, Santa Barbara, Lima). Cada sucursal neutraliza los traslados entre sus propios almacenes, comparados sin mayúsculas ni tildes. San José = Tienda Juliaca + Almacén Juliaca (el almacén compartido se suma a San José), Santa Barbara = SANTA BARBARA, Lima = YUJU STORE PRINCIPAL.
+- `preve_config.json` y `ciclo_estado.json` se importan a la base una sola vez. El estado del ciclo es por sucursal y las etiquetas PRELIMINAR/BORRADOR/FINAL escalan con la duración del ciclo.
+- **Stock de seguridad del ROP** escalado a √(lead time / horizonte) (`stock_seguridad_lead_time`). El nivel objetivo y la cantidad a pedir no cambian.
+
 ## [Fase 2] — 2026-11-05 · Migración a SQLite con capa de abstracción
 
 ### Agregado

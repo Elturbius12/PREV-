@@ -458,6 +458,36 @@ class Database:
                                                            creada_en=_ahora())).inserted_primary_key[0]
         return fid
 
+    def obtener_empresa(self, empresa_id=None):
+        empresa_id = empresa_id or self.empresa_por_defecto()
+        with self.engine.connect() as conn:
+            f = conn.execute(select(empresas).where(empresas.c.id == empresa_id)).first()
+        return dict(f._mapping) if f else None
+
+    def actualizar_empresa(self, nombre=None, moneda=None, igv_factor=None, empresa_id=None):
+        empresa_id = empresa_id or self.empresa_por_defecto()
+        valores = {k: v for k, v in (('nombre', nombre), ('moneda', moneda), ('igv_factor', igv_factor))
+                   if v is not None}
+        if valores:
+            with self.engine.begin() as conn:
+                conn.execute(update(empresas).where(empresas.c.id == empresa_id).values(**valores))
+
+    def actualizar_sucursal(self, codigo, nombre=None, activa=None, empresa_id=None):
+        empresa_id = empresa_id or self.empresa_por_defecto()
+        valores = {k: v for k, v in (('nombre', nombre), ('activa', activa)) if v is not None}
+        if valores:
+            with self.engine.begin() as conn:
+                conn.execute(update(sucursales).where(sucursales.c.empresa_id == empresa_id,
+                                                      sucursales.c.codigo == codigo).values(**valores))
+
+    def desactivar_ciclos_excepto(self, nombres, empresa_id=None):
+        """Desactiva (no borra) los ciclos que ya no están en la lista."""
+        empresa_id = empresa_id or self.empresa_por_defecto()
+        with self.engine.begin() as conn:
+            conn.execute(update(ciclos_compra).where(ciclos_compra.c.empresa_id == empresa_id,
+                                                     ciclos_compra.c.nombre.not_in(list(nombres)))
+                         .values(activo=False))
+
     def empresa_por_defecto(self):
         """Primera empresa registrada (la crea si no hay ninguna)."""
         with self.engine.connect() as conn:

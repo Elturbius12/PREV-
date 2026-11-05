@@ -139,7 +139,7 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None):
             logger.warning('No se pudo leer %s', ruta_sp, exc_info=True)
 
     meta = {'titulo': 'Informe de compras para gerencia', 'sucursal': sucursal,
-            'subtitulo': f'Yuju Store · {sucursal}' + (f' · Ciclo #{ci["numero"]}' if ci else '')
+            'subtitulo': f'{dt.empresa_nombre()} · {sucursal}' + (f' · Ciclo #{ci["numero"]}' if ci else '')
                          + (f' · {etiqueta.capitalize()}' if etiqueta else ''),
             'fecha': fecha_larga(hoy) + f' de {hoy.year}',
             'datos': f'Datos al {d.fecha_ref.strftime("%d/%m/%Y")}'}
@@ -351,11 +351,12 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None):
     # ── Metodología ──
     B.append(('h1', 'Anexo. Cómo se calculan las cifras'))
     B.append(('bullets', [
-        f'Horizonte de planificación: {dt.HORIZONTE_DIAS} días (105 de intervalo de revisión + {dt.LEAD} de entrega).',
+        f'Horizonte de planificación: {dt.HORIZONTE_DIAS} días ({dt.duracion_ciclo()} de intervalo de revisión + {dt.LEAD} de entrega).',
         'Pronóstico: cada producto se asigna a LightGBM, CatBoost o Croston-TSB según su patrón de ventas '
         '(ADI/CV², umbrales de Syntetos-Boylan).',
-        'Punto de reorden = demanda esperada + stock de seguridad (niveles de servicio 95%, 90% y 85% para las '
-        'clases A, B y C). Cantidad a comprar = punto de reorden − stock actual.',
+        'Nivel objetivo = demanda esperada del horizonte + stock de seguridad (niveles de servicio por clase ABC). '
+        'Punto de reorden = demanda durante el tiempo de entrega + su stock de seguridad. '
+        'Cantidad a comprar = nivel objetivo − stock actual − stock en tránsito.',
         'Urgente: hay que recomprar y el stock alcanza para menos días que el tiempo de entrega.',
         'Rotación y margen esperado se calculan con costos y precios del ERP (precio sin IGV). El stock es el '
         'reconstruido por PREVÉ a partir de ventas, compras y movimientos.',
@@ -425,7 +426,7 @@ def _escribir_docx(meta, B, ruta):
     # Pie con número de página
     p = sec.footer.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run('PREVÉ · Yuju Store — Página ')
+    r = p.add_run(f'PREVÉ · {dt.empresa_nombre()} — Página ')
     r.font.size, r.font.color.rgb = Pt(8), rgb(GRIS)
     r2 = p.add_run()
     r2.font.size = Pt(8)
@@ -550,13 +551,13 @@ def _escribir_pdf(meta, B, ruta):
         canvas.saveState()
         canvas.setFont('Helvetica', 7.5)
         canvas.setFillColor(gris)
-        canvas.drawCentredString(A4[0] / 2, 1.1 * cm, f'PREVÉ · Yuju Store — Página {doc_.page}')
+        canvas.drawCentredString(A4[0] / 2, 1.1 * cm, f'PREVÉ · {dt.empresa_nombre()} — Página {doc_.page}')
         canvas.setFillColor(colors.HexColor('#FF6B00'))
         canvas.rect(0, A4[1] - 0.25 * cm, A4[0], 0.25 * cm, stroke=0, fill=1)   # banda Yuju
         canvas.restoreState()
 
     doc = SimpleDocTemplate(ruta, pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm, topMargin=1.8 * cm,
-                            bottomMargin=1.8 * cm, title=meta['titulo'], author='PREVÉ · Yuju Store')
+                            bottomMargin=1.8 * cm, title=meta['titulo'], author=f'PREVÉ · {dt.empresa_nombre()}')
     ancho = A4[0] - 4 * cm
     E = [Paragraph('<font color="%s"><b>PREVÉ</b></font>' % VERDE, ParagraphStyle('x', fontName='Helvetica', fontSize=11)),
          Spacer(1, 4),

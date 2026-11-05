@@ -766,16 +766,20 @@ class VistaDecision(Vista):
 # SIMULAR — sliders en vez de cajas numéricas
 # ══════════════════════════════════════════════════════════════════
 class VistaSimular(Vista):
-    PARAMS = [
-        dict(k='demanda', t='Cambio en la demanda', a='¿Y si vendes más o menos de lo previsto?',
-             lo=-50, hi=100, paso=5, ini=0, fmt=lambda v: f'{v:+d}%' if v else '0%'),
-        dict(k='leadtime', t='Días que tarda en llegar la mercadería', a=f'Hoy son {dt.LEAD} días. ¿Y si tarda más o menos?',
-             lo=5, hi=120, paso=1, ini=dt.LEAD, fmt=lambda v: f'{v} días'),
-        dict(k='horizonte', t='Días de cobertura que quieres tener', a=f'Hoy cubres {dt.HORIZONTE_DIAS} días.',
-             lo=30, hi=300, paso=1, ini=dt.HORIZONTE_DIAS, fmt=lambda v: f'{v} días'),
-        dict(k='costo', t='Cambio en los costos de compra', a='Ej: +10% si el proveedor sube precios.',
-             lo=-30, hi=50, paso=1, ini=0, fmt=lambda v: f'{v:+d}%' if v else '0%'),
-    ]
+    @property
+    def PARAMS(self):
+        # FIX (Fase 3): lead time y horizonte actuales desde la configuración (se leen al mostrar la vista)
+        lt, hz = dt.lead_time(), dt.horizonte()
+        return [
+            dict(k='demanda', t='Cambio en la demanda', a='¿Y si vendes más o menos de lo previsto?',
+                 lo=-50, hi=100, paso=5, ini=0, fmt=lambda v: f'{v:+d}%' if v else '0%'),
+            dict(k='leadtime', t='Días que tarda en llegar la mercadería', a=f'Hoy son {lt} días. ¿Y si tarda más o menos?',
+                 lo=5, hi=120, paso=1, ini=lt, fmt=lambda v: f'{v} días'),
+            dict(k='horizonte', t='Días de cobertura que quieres tener', a=f'Hoy cubres {hz} días.',
+                 lo=30, hi=300, paso=1, ini=hz, fmt=lambda v: f'{v} días'),
+            dict(k='costo', t='Cambio en los costos de compra', a='Ej: +10% si el proveedor sube precios.',
+                 lo=-30, hi=50, paso=1, ini=0, fmt=lambda v: f'{v:+d}%' if v else '0%'),
+        ]
 
     def build(self):
         self.scroll = ScrollFrame(self)
@@ -1016,6 +1020,75 @@ class VistaHistorial(Vista):
 # CONFIGURACIÓN
 # ══════════════════════════════════════════════════════════════════
 class VistaConfig(Vista):
+    """Preferencias de la PC + (Fase 3) empresa, sucursales, ciclos y parámetros del modelo."""
+
+    def _card_empresa(self):
+        app, cfg = self.app, dt.Config.actual()
+        card = Card(self.cont, padx=22, pady=18)
+        card.pack(fill='x', padx=S(PADX), pady=(0, S(12)))
+        top = tk.Frame(card.body, bg=SURFACE)
+        top.pack(fill='x')
+        label(top, 'Empresa, sucursales y ciclos de compra', 11, 'bold').pack(side='left')
+        Btn(top, 'Editar en el asistente', lambda: app.abrir_asistente(0), 'secondary', 'sm').pack(side='right')
+        e = cfg.empresa
+        filas = [('Empresa', f'{e["nombre"]} · {e["moneda"]} · IGV {(e["igv_factor"] - 1) * 100:.0f}%'),
+                 ('Sucursales', ' · '.join(f'{s["nombre"]} ({", ".join(s["almacenes"])})'
+                                           for s in cfg.sucursales if s['activa']) or '—')]
+        for c in cfg.ciclos:
+            filas.append((f'Ciclo {c["nombre"]}', f'cada {c["duracion_dias"]} días · lead time {c["lead_time_dias"]} d · '
+                                                  f'cubre {c["horizonte_pronostico_dias"]} d'))
+        for t, v in filas:
+            fr = tk.Frame(card.body, bg=SURFACE)
+            fr.pack(fill='x', pady=S(2))
+            label(fr, t, 10, 'bold', width=18, anchor='w').pack(side='left')
+            label(fr, v, 9, color=TEXT_DIM, wraplength=S(640), justify='left').pack(side='left')
+
+    def _card_parametros(self):
+        import json
+        cfg = dt.Config.actual()
+        card = Card(self.cont, padx=22, pady=18)
+        card.pack(fill='x', padx=S(PADX), pady=(0, S(12)))
+        label(card.body, 'Parámetros del modelo', 11, 'bold').pack(anchor='w')
+        label(card.body, 'Cambian los cálculos del próximo análisis. Los valores por defecto son los que PREVÉ '
+                         'usó siempre.', 9, color=TEXT_DIM).pack(anchor='w', pady=(0, S(8)))
+        z = cfg.get('z_nivel_servicio')
+        campos = [('z_A', 'Z clase A', z.get('A')), ('z_B', 'Z clase B', z.get('B')), ('z_C', 'Z clase C', z.get('C')),
+                  ('adi_umbral', 'Umbral ADI', cfg.get('adi_umbral')), ('cv2_umbral', 'Umbral CV²', cfg.get('cv2_umbral')),
+                  ('semanas_lanzamiento', 'Semanas de lanzamiento', cfg.get('semanas_lanzamiento')),
+                  ('dias_entre_importaciones', 'Días entre importaciones', cfg.get('dias_entre_importaciones'))]
+        self.vars_param = {}
+        grid = tk.Frame(card.body, bg=SURFACE)
+        grid.pack(anchor='w')
+        for i, (k, t, v) in enumerate(campos):
+            label(grid, t, 9, 'bold', width=22, anchor='w').grid(row=i // 2, column=(i % 2) * 2, sticky='w',
+                                                                 pady=S(3))
+            self.vars_param[k] = tk.StringVar(value=str(v))
+            entry(grid, self.vars_param[k], width=10).grid(row=i // 2, column=(i % 2) * 2 + 1, sticky='w',
+                                                           padx=(0, S(24)), ipady=S(3))
+        for k, t in (('ventas_son_salidas_de_almacen', 'El ERP registra cada venta también como salida de almacén'),
+                     ('compras_son_entradas_de_almacen', 'El ERP registra cada compra también como entrada de almacén')):
+            self.vars_param[k] = tk.BooleanVar(value=bool(cfg.get(k)))
+            tk.Checkbutton(card.body, text=t, variable=self.vars_param[k], font=f(9), bg=SURFACE,
+                           activebackground=SURFACE, anchor='w').pack(anchor='w', pady=(S(4), 0))
+        label(card.body, 'AVANZADO · hiperparámetros (JSON)', 8, 'bold', TEXT_MUTED).pack(anchor='w', pady=(S(12), S(4)))
+        for k, t in (('lgbm_params', 'LightGBM'), ('catboost_params', 'CatBoost'), ('tsb_params', 'Croston-TSB')):
+            fr = tk.Frame(card.body, bg=SURFACE)
+            fr.pack(fill='x', pady=S(2))
+            label(fr, t, 9, 'bold', width=14, anchor='w').pack(side='left')
+            self.vars_param[k] = tk.StringVar(value=json.dumps(cfg.get(k)))
+            entry(fr, self.vars_param[k], width=80).pack(side='left', fill='x', expand=True, ipady=S(3))
+        Btn(card.body, 'Guardar parámetros', self._guardar_parametros, 'primary', 'md').pack(anchor='w',
+                                                                                        pady=(S(12), 0))
+
+    def _guardar_parametros(self):
+        from preve_config import ConfigError
+        try:
+            dt.Config.actual().guardar_parametros_modelo({k: v.get() for k, v in self.vars_param.items()})
+        except ConfigError as e:
+            self.app.toast(f'No se guardó: {e}', 'error')
+            return
+        self.app.toast('Parámetros guardados. Se aplican en el próximo análisis.', 'ok')
+
     ATAJOS = [('Ctrl + G', 'Generar recomendación (otra vez, para ejecutar)'), ('Ctrl + S', 'Simular (otra vez, para ejecutar)'),
               ('Ctrl + K', 'Buscador global'), ('Ctrl + H', 'Historial'), ('Ctrl + R', 'Recomendaciones'),
               ('Ctrl + D', 'Decisión rápida'), ('Ctrl + I', 'Inicio'), ('← →', 'Saltar / comprar en decisión rápida')]
@@ -1038,7 +1111,8 @@ class VistaConfig(Vista):
         fila = tk.Frame(card.body, bg=SURFACE)
         fila.pack(anchor='w')
         entry(fila, var, width=28).pack(side='left', ipady=S(5))
-        Btn(fila, 'Guardar', lambda: app.guardar_usuario(var.get().strip() or 'Julio'), 'secondary', 'md'
+        # FIX (Fase 3): nombre por defecto genérico (antes 'Julio' fijo)
+        Btn(fila, 'Guardar', lambda: app.guardar_usuario(var.get().strip() or 'Usuario'), 'secondary', 'md'
             ).pack(side='left', padx=(S(8), 0))
 
         card = Card(self.cont, padx=22, pady=18)
@@ -1054,6 +1128,9 @@ class VistaConfig(Vista):
             label(fr, nombre, 10, 'bold', width=16, anchor='w').pack(side='left')
             label(fr, ruta_corta(app.carpeta(clave), 80) or 'sin elegir', 9, color=TEXT_DIM, mono=True
                   ).pack(side='left')
+
+        self._card_empresa()
+        self._card_parametros()
 
         card = Card(self.cont, padx=22, pady=18)
         card.pack(fill='x', padx=S(PADX), pady=(0, S(12)))

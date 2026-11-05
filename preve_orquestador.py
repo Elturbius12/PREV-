@@ -7,19 +7,17 @@ import datetime
 import pandas as pd
 
 from preve_pipeline import (
-    cargar_datos, construir_dim_producto, construir_mapas, reconstruir_stock,
+    cargar_datos, construir_dim_producto, construir_mapas, reconstruir_stock, aplicar_mapeo_ventas,
     construir_panel_y_segmentacion, entrenar_y_pronosticar, calcular_recomendacion,
     cargar_ordenes_abiertas,
-    HORIZONTE_DIAS, HORIZONTE_SEMANAS_LOCAL, LEAD_TIME_DIAS_INT, LEAD_TIME_DIAS_LOCAL,
 )
-from preve_ciclo import (
-    registrar_importacion, resumen_ciclo_texto,
-    HORIZONTE_LOCAL, LEAD_TIME_LOCAL,
-)
+from preve_ciclo import registrar_importacion, resumen_ciclo_texto
+from preve_config import Config
 from preve_validacion import generar_scorecard
 from preve_historial import registrar_ejecucion
 from preve_simulacion import simular, generar_excel_simulacion
 from preve_utils import get_logger
+from database import slug
 
 logger = get_logger('orquestador')
 
@@ -28,31 +26,37 @@ NOMBRE_REC_ANTERIOR_META = 'recomendacion_anterior_meta.json'
 NOMBRE_SCORECARD_JSON = 'scorecard_ultimo.json'
 _COLS_DEMANDA = ('demanda_p50_141d', 'demanda_p10_141d', 'demanda_p90_141d')
 
-# Sucursales conocidas de Yuju Store
-SUCURSALES = {
-    'San José': {'Tienda Juliaca', 'Almacén Juliaca', 'Almacen Juliaca'},
-    'Ayaviri':  {'Tienda Ayaviri', 'Almacén Ayaviri', 'Almacen Ayaviri'},
-    'Santa Lucía': {'Tienda Santa Lucía', 'Tienda Santa Lucia',
-                    'Almacén Santa Lucía', 'Almacen Santa Lucia'},
-}
+
+def _archivos_ciclo_secundario(nombre):
+    """(nota de compra, csv) de un ciclo secundario. 'Local' conserva los nombres de siempre."""
+    if slug(nombre) == 'local':
+        return 'PREVE_Notas_Compra_Local.xlsx', 'recomendacion_compra_local.csv'
+    return f'PREVE_Notas_Compra_{slug(nombre)}.xlsx', f'recomendacion_compra_{slug(nombre)}.csv'
 
 
 def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
                       sucursal='San José'):
-    """Pipeline principal: genera reporte internacional + reporte local + ciclo."""
-    from preve_datos import cargar_config
+    """Pipeline principal: reporte del ciclo principal + notas de compra de cada ciclo secundario."""
     os.makedirs(carpeta_salida, exist_ok=True)
-    cfg = cargar_config()
+    # FIX (Fase 3): todos los parámetros salen de la configuración (antes fijos en el código)
+    conf = Config.actual()
+    conf.invalidar()
+    principal = conf.ciclo_principal
+    secundarios = conf.ciclos[1:]
+    params = conf.parametros_modelo(sucursal, principal)
+    nombre_p = principal['nombre'].upper()
 
     # ── Ciclo: vista previa (se confirma recién al terminar con éxito) ──
     # FIX: antes la importación se registraba al inicio aunque el pipeline fallara después
     progreso('Calculando la posición en el ciclo de compras...')
-    info_ciclo = registrar_importacion(carpeta_salida, guardar=False)
+    info_ciclo = registrar_importacion(carpeta_salida, guardar=False, sucursal=sucursal,
+                                       duracion_dias=principal['duracion_dias'])
     etiqueta = info_ciclo['etiqueta']
     progreso(resumen_ciclo_texto(info_ciclo))
 
     progreso('Paso 1/7 — Cargando tus reportes del ERP...')
     listado, ventas, compras, movimientos = cargar_datos(carpeta_entrada, progreso)
+    ventas = aplicar_mapeo_ventas(ventas, conf.get('mapeo_columnas_ventas'), progreso)
 
     progreso('Paso 2/7 — Identificando productos y códigos de barra...')
     dim, mapa_nombre_df = construir_dim_producto(listado, progreso)
@@ -68,15 +72,17 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
     stock, ventas_diarias, _ = reconstruir_stock(
         ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_bc_nombre_a_sku, mapa_nombre_a_sku,
         fecha_ancla, progreso,
-        ventas_son_salidas_de_almacen=bool(cfg.get('ventas_son_salidas_de_almacen', False)),
-        compras_son_entradas_de_almacen=bool(cfg.get('compras_son_entradas_de_almacen', False)))
+        ventas_son_salidas_de_almacen=params.ventas_son_salidas_de_almacen,
+        compras_son_entradas_de_almacen=params.compras_son_entradas_de_almacen,
+        almacenes_propios=params.almacenes_propios)
     fecha_datos = stock.index.max()
     transito = cargar_ordenes_abiertas(carpeta_salida)
     if len(transito):
         progreso(f'Stock en tránsito: {len(transito)} SKU con órdenes abiertas ({transito.sum():,.0f} u)')
 
     progreso('Paso 4/7 — Construyendo el panel semanal y segmentando productos...')
-    panel_full, segmentacion, fecha_fin = construir_panel_y_segmentacion(stock, ventas_diarias, dim, progreso)
+    panel_full, segmentacion, fecha_fin = construir_panel_y_segmentacion(stock, ventas_diarias, dim, progreso,
+                                                                         params=params)
 
     # Excel rápido de clasificación: ya se puede revisar mientras los modelos siguen entrenando
     try:
@@ -87,50 +93,59 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
         progreso(f'⚠ No se pudo generar el Excel de clasificación: {e}')
 
     progreso('Paso 5/7 — Entrenando los 3 modelos de pronóstico (puede tardar unos minutos)...')
-    pronostico, sin_pronostico = entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, progreso)
+    pronostico, sin_pronostico = entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, progreso,
+                                                        params=params)
 
     # ══════════════════════════════════════════════════════════════════
-    # REPORTE INTERNACIONAL (horizonte 141 días)
+    # REPORTE DEL CICLO PRINCIPAL (el de mayor horizonte; en Yuju: internacional, 141 días)
     # ══════════════════════════════════════════════════════════════════
-    progreso(f'Paso 6/7 — Reporte INTERNACIONAL ({etiqueta}): calculando compras a 141 días...')
+    hz_p = principal['horizonte_pronostico_dias']
+    progreso(f'Paso 6/7 — Reporte {nombre_p} ({etiqueta}): calculando compras a {hz_p} días...')
     rec_int = calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fecha_fin, progreso,
                                      compras_raw=compras, mapa_bc_a_sku=mapa_bc_a_sku,
-                                     stock_en_transito=transito, lead_time_dias=LEAD_TIME_DIAS_INT)
+                                     stock_en_transito=transito, params=params)
 
-    progreso(f'Generando archivos del reporte internacional ({etiqueta})...')
+    progreso(f'Generando archivos del reporte {nombre_p.lower()} ({etiqueta})...')
+    info_ciclo['ciclo_nombre'] = principal['nombre']
+    info_ciclo['horizonte_dias'] = hz_p
     _generar_excel(rec_int, sin_pronostico, carpeta_salida, progreso,
                    etiqueta=etiqueta, info_ciclo=info_ciclo)
     _generar_notas_compra_proveedor(rec_int, carpeta_salida, progreso, etiqueta=etiqueta)
     _generar_dashboard(rec_int, sin_pronostico, carpeta_salida, progreso,
-                       etiqueta=etiqueta, info_ciclo=info_ciclo)
+                       etiqueta=etiqueta, info_ciclo=info_ciclo, horizonte_semanas=params.horizonte_semanas)
 
     rec_int.to_csv(os.path.join(carpeta_salida, 'recomendacion_compra.csv'), index=False)
     sin_pronostico.to_csv(os.path.join(carpeta_salida, 'skus_sin_pronostico.csv'), index=False)
 
     # ══════════════════════════════════════════════════════════════════
-    # REPORTE LOCAL (horizonte 40 días)
+    # CICLOS SECUNDARIOS (en Yuju: local, 40 días) — FIX (Fase 3): N ciclos configurables, no solo 2
     # ══════════════════════════════════════════════════════════════════
-    progreso('Paso 7/7 — Reporte LOCAL: calculando compras a 40 días para proveedores nacionales...')
-    rec_local = calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fecha_fin, progreso,
-                                       compras_raw=compras, mapa_bc_a_sku=mapa_bc_a_sku,
-                                       horizonte_semanas_override=HORIZONTE_SEMANAS_LOCAL,
-                                       stock_en_transito=transito, lead_time_dias=LEAD_TIME_DIAS_LOCAL)
-
-    # Solo generar nota de compra local para productos que necesitan compra
-    _generar_notas_compra_proveedor(rec_local, carpeta_salida, progreso,
-                                    etiqueta='LOCAL', nombre_archivo='PREVE_Notas_Compra_Local.xlsx')
-
-    # Guardar CSV local
-    rec_local.to_csv(os.path.join(carpeta_salida, 'recomendacion_compra_local.csv'), index=False)
+    if not secundarios:
+        progreso('Paso 7/7 — No hay ciclos de compra secundarios configurados.')
+    for i, ciclo in enumerate(secundarios):
+        hz = ciclo['horizonte_pronostico_dias']
+        progreso(f'Paso 7/7 — Reporte {ciclo["nombre"].upper()} ({i + 1}/{len(secundarios)}): '
+                 f'calculando compras a {hz} días...')
+        rec_sec = calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fecha_fin, progreso,
+                                         compras_raw=compras, mapa_bc_a_sku=mapa_bc_a_sku,
+                                         horizonte_semanas_override=hz / 7.0, stock_en_transito=transito,
+                                         lead_time_dias=ciclo['lead_time_dias'], params=params)
+        nota, csv = _archivos_ciclo_secundario(ciclo['nombre'])
+        _generar_notas_compra_proveedor(rec_sec, carpeta_salida, progreso,
+                                        etiqueta=ciclo['nombre'].upper(), nombre_archivo=nota)
+        rec_sec.to_csv(os.path.join(carpeta_salida, csv), index=False)
 
     # ══════════════════════════════════════════════════════════════════
     # VALIDACIÓN AUTOMÁTICA (si existe recomendación anterior)
     # ══════════════════════════════════════════════════════════════════
     scorecard_result = _intentar_validacion(rec_int, ventas_diarias, carpeta_salida, progreso,
-                                            fecha_datos=fecha_datos)
+                                            fecha_datos=fecha_datos, horizonte_dias=hz_p,
+                                            igv_factor=params.igv_factor)
 
     # FIX: la importación se confirma en el ciclo solo cuando el análisis terminó bien
-    info_ciclo = registrar_importacion(carpeta_salida)
+    info_ciclo = dict(registrar_importacion(carpeta_salida, sucursal=sucursal,
+                                            duracion_dias=principal['duracion_dias']),
+                      ciclo_nombre=principal['nombre'], horizonte_dias=hz_p)
 
     # ══════════════════════════════════════════════════════════════════
     # HISTORIAL SQLite
@@ -146,7 +161,8 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
 
     # ── Base de datos: ventas, stock y pronósticos acumulados (para backtesting y multi-sucursal) ──
     try:
-        _guardar_en_base(sucursal, dim, segmentacion, ventas_diarias, stock, rec_int, fecha_datos, progreso)
+        _guardar_en_base(sucursal, dim, segmentacion, ventas_diarias, stock, rec_int, fecha_datos, progreso,
+                         horizonte_dias=hz_p)
     except (OSError, ValueError, KeyError, SQLAlchemyError) as e:
         logger.exception('No se pudieron guardar los datos en preve.db')
         progreso(f'⚠ No se pudieron guardar los datos en la base: {e}')
@@ -164,13 +180,14 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
         progreso(f'⚠ No se pudo generar el informe para gerencia: {e}')
 
     progreso('═' * 60)
-    progreso(f'¡Listo! Reporte {etiqueta} + reporte LOCAL generados en: {carpeta_salida}')
+    extra = ' + ' + ', '.join(c['nombre'].upper() for c in secundarios) if secundarios else ''
+    progreso(f'¡Listo! Reporte {nombre_p} {etiqueta}{extra} generados en: {carpeta_salida}')
     progreso(f'Sucursal: {sucursal}')
     progreso('═' * 60)
     return rec_int
 
 
-def _guardar_en_base(sucursal, dim, segmentacion, ventas_diarias, stock, rec, fecha_datos, log):
+def _guardar_en_base(sucursal, dim, segmentacion, ventas_diarias, stock, rec, fecha_datos, log, horizonte_dias=141):
     """Persiste en preve.db el catálogo, las ventas diarias, el stock actual y el pronóstico de esta corrida."""
     from database import Database
     db = Database.default()
@@ -181,7 +198,7 @@ def _guardar_en_base(sucursal, dim, segmentacion, ventas_diarias, stock, rec, fe
     n_s = db.guardar_stock_actual(sucursal, stock.loc[stock.index.max()], fecha_datos)
     inicio = pd.Timestamp(fecha_datos) + pd.Timedelta(days=1)
     n_p = db.guardar_pronosticos(sucursal, rec, datetime.datetime.now(), inicio,
-                                 inicio + pd.Timedelta(days=HORIZONTE_DIAS - 1))
+                                 inicio + pd.Timedelta(days=int(horizonte_dias) - 1))
     log(f'Base de datos: {n_v:,} ventas diarias, {n_s:,} stocks y {n_p:,} pronósticos guardados')
 
 
@@ -297,7 +314,10 @@ def ejecutar_pipeline_multi_sucursal(carpeta_entrada, carpeta_salida, progreso=p
                    if os.path.isdir(os.path.join(carpeta_entrada, d))]
 
     sucursales_encontradas = {}
-    for nombre_sucursal, almacenes in SUCURSALES.items():
+    # FIX (Fase 3): las sucursales y sus almacenes vienen de la configuración (antes una lista fija
+    # distinta de la de la interfaz)
+    conf_suc = {s['nombre']: s['almacenes'] for s in Config.actual().sucursales if s['activa']}
+    for nombre_sucursal, almacenes in conf_suc.items():
         # Buscar subcarpeta que coincida
         for sub in subcarpetas:
             if sub.lower().replace(' ', '') in [
@@ -418,12 +438,18 @@ def ejecutar_simulacion(carpeta_salida, escenario, progreso=print):
         return None
 
     rec = pd.read_csv(csv_rec)
-    resultado = simular(rec, escenario, log=progreso)
+    # FIX (Fase 3): lead time, horizonte y Z actuales desde la configuración (antes 36 / 141 fijos)
+    conf = Config.actual()
+    principal = conf.ciclo_principal
+    resultado = simular(rec, escenario, log=progreso, lead_time_actual=principal['lead_time_dias'],
+                        horizonte_actual=principal['horizonte_pronostico_dias'],
+                        z_actual=conf.get('z_nivel_servicio'))
     generar_excel_simulacion(resultado, carpeta_salida, log=progreso)
     return resultado
 
 
-def _intentar_validacion(rec_actual, ventas_diarias, carpeta_salida, log, fecha_datos=None):
+def _intentar_validacion(rec_actual, ventas_diarias, carpeta_salida, log, fecha_datos=None,
+                         horizonte_dias=141, igv_factor=1.18):
     """Valida la recomendación anterior contra las ventas reales ocurridas desde entonces.
 
     ventas_diarias: DataFrame sku / fecha / mov (mov negativo = unidades vendidas), de reconstruir_stock.
@@ -467,11 +493,11 @@ def _intentar_validacion(rec_actual, ventas_diarias, carpeta_salida, log, fecha_
             vd = ventas_diarias[(ventas_diarias['fecha'] > fecha_ant) & (ventas_diarias['fecha'] <= fecha_datos)]
             venta_real = (-vd.groupby('sku')['mov'].sum()).rename('venta_real').reset_index()
             # FIX: el pronóstico es para 141 días; se prorratea a los días realmente transcurridos
-            factor = min(1.0, dias / HORIZONTE_DIAS)
+            factor = min(1.0, dias / float(horizonte_dias))
             for col in _COLS_DEMANDA:
                 if col in recom_ant.columns:
                     recom_ant[col] = recom_ant[col] * factor
-            resultado = generar_scorecard(carpeta_salida, recom_ant, venta_real, log)
+            resultado = generar_scorecard(carpeta_salida, recom_ant, venta_real, log, igv_factor=igv_factor)
             resultado['periodo'] = {'desde': str(fecha_ant.date()), 'hasta': str(fecha_datos.date()),
                                     'dias': dias, 'factor_prorrateo': round(factor, 4)}
             log(f'Scorecard: {resultado["agregadas"]["calificacion"]} '
@@ -505,7 +531,7 @@ def _generar_excel(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_cic
         'proveedor_principal': 'Proveedor principal',
         'clase_abc': 'Clase ABC (por margen)', 'modelo_asignado': 'Modelo usado',
         'accion': 'ACCIÓN', 'motivo_accion': 'Motivo de la acción',
-        'stock_actual': 'Stock actual (reconstruido)', 'demanda_p50_141d': 'Demanda esperada (141 dias)',
+        'stock_actual': 'Stock actual (reconstruido)', 'demanda_p50_141d': 'Demanda esperada (horizonte)',
         'demanda_p10_141d': 'Demanda minima esperada (P10)', 'demanda_p90_141d': 'Demanda maxima esperada (P90)',
         'stock_en_transito': 'Stock en tránsito (órdenes abiertas)',
         'demanda_lead_time': 'Demanda durante el lead time',
@@ -518,7 +544,7 @@ def _generar_excel(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_cic
     }
     available_cols = [c for c in cols.keys() if c in df.columns]
     df2 = df[available_cols].rename(columns=cols)
-    for c in ['Demanda esperada (141 dias)', 'Stock de seguridad', 'Punto de reorden (ROP)', 'Nivel objetivo',
+    for c in ['Demanda esperada (horizonte)', 'Stock de seguridad', 'Punto de reorden (ROP)', 'Nivel objetivo',
               'Demanda durante el lead time', 'Inversion total (S/)']:
         if c in df2.columns:
             df2[c] = df2[c].round(1)
@@ -531,15 +557,20 @@ def _generar_excel(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_cic
     ws = wb.active
     ws.title = 'Recomendacion de compra'
     ws.merge_cells('A1:F1')
-    ws['A1'] = f'PREVÉ · Yuju Store — Recomendación de compra [{etiqueta}]'
+    # FIX (Fase 3): empresa, duración del ciclo y horizonte desde la configuración (antes "Yuju Store", 105 y 141)
+    empresa = Config.actual().empresa['nombre']
+    total_ciclo = (info_ciclo or {}).get('ciclo_dias', Config.actual().ciclo_principal['duracion_dias'])
+    hz = (info_ciclo or {}).get('horizonte_dias', Config.actual().ciclo_principal['horizonte_pronostico_dias'])
+    ws['A1'] = f'PREVÉ · {empresa} — Recomendación de compra [{etiqueta}]'
     ws['A1'].font = Font(size=16, bold=True, color='FFFFFF')
     ws['A1'].fill = PatternFill('solid', fgColor=ORANGE)
     ws.row_dimensions[1].height = 28
     ws.merge_cells('A2:F2')
     ciclo_txt = ''
     if info_ciclo:
-        ciclo_txt = f' | Ciclo #{info_ciclo["ciclo_numero"]} día {info_ciclo["dia_ciclo"]}/{105}'
-    ws['A2'] = f'Generado: {datetime.date.today().isoformat()} | Reporte: {etiqueta} | Horizonte: 141 dias | SKU evaluados: {len(df2)}{ciclo_txt}'
+        ciclo_txt = f' | Ciclo #{info_ciclo["ciclo_numero"]} día {info_ciclo["dia_ciclo"]}/{total_ciclo}'
+    ws['A2'] = (f'Generado: {datetime.date.today().isoformat()} | Reporte: {etiqueta} | Horizonte: {hz} dias | '
+                f'SKU evaluados: {len(df2)}{ciclo_txt}')
     ws.append([])
     header_row = 4
     for j, col in enumerate(df2.columns, start=1):
@@ -603,7 +634,7 @@ def _generar_excel(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_cic
         resumen += [
             ('', ''),
             ('── CICLO DE COMPRAS ──', ''),
-            (f'Ciclo #{info_ciclo["ciclo_numero"]}', f'Día {info_ciclo["dia_ciclo"]} de 105'),
+            (f'Ciclo #{info_ciclo["ciclo_numero"]}', f'Día {info_ciclo["dia_ciclo"]} de {total_ciclo}'),
             ('Importación #', info_ciclo['importacion_num']),
             ('Tipo de reporte', etiqueta),
             ('Días restantes para pedido', info_ciclo['dias_restantes']),
@@ -718,15 +749,17 @@ def _generar_notas_compra_proveedor(df, carpeta_salida, log, etiqueta='FINAL',
     log(f'Notas de compra [{etiqueta}] por proveedor: {path} ({len(proveedores)} proveedores)')
 
 
-def _generar_dashboard(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_ciclo=None):
-    from preve_pipeline import HORIZONTE_SEMANAS
+def _generar_dashboard(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_ciclo=None,
+                       horizonte_semanas=141 / 7.0):
+    # FIX (Fase 3): horizonte del ciclo configurado (antes HORIZONTE_SEMANAS fijo)
+    hz_dias = round(horizonte_semanas * 7)
 
     def _explicacion(row):
-        vs = (row['demanda_p50_141d'] / HORIZONTE_SEMANAS) if row['demanda_p50_141d'] else 0
+        vs = (row['demanda_p50_141d'] / horizonte_semanas) if row['demanda_p50_141d'] else 0
         if row['decision'] == 'COMPRAR':
             # FIX: la explicación usa el nivel objetivo (cobertura del horizonte), no el ROP
             transito = row.get('stock_en_transito', 0) or 0
-            txt = (f"Se espera vender ~{vs:.0f} unidades/semana en las próximas ~20 semanas. "
+            txt = (f"Se espera vender ~{vs:.0f} unidades/semana en las próximas ~{horizonte_semanas:.0f} semanas. "
                    f"Tienes {row['stock_actual']:.0f} en stock"
                    + (f" y {transito:.0f} en camino" if transito else "")
                    + f"; para cubrir el horizonte con margen de seguridad necesitas "
@@ -734,7 +767,7 @@ def _generar_dashboard(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info
                    f"Por eso se sugiere comprar {row['compra_sugerida_unid']:.0f}.")
         else:
             txt = (f"Tu stock actual ({row['stock_actual']:.0f}) ya cubre lo que se espera vender "
-                   f"en los próximos 141 días, así que no necesitas comprar por ahora.")
+                   f"en los próximos {hz_dias} días, así que no necesitas comprar por ahora.")
         if row.get('revisar_antes_de_comprar'):
             txt += " ⚠ Esta cantidad parece inflada por una venta puntual fuera de lo común — revisa antes de comprar."
         return txt

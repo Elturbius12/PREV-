@@ -467,14 +467,14 @@ class PreveApp:
         self.root = root
         ui.init_ui(root)
         self.cfg = dt.cargar_config()
-        self.sucursal = self.cfg['sucursal'] if self.cfg['sucursal'] in dt.SUCURSALES else dt.SUCURSALES[0]
+        self.sucursal = self.cfg['sucursal'] if self.cfg['sucursal'] in dt.sucursales() else dt.sucursales()[0]
         self.generando = False
         self.paleta = None
         self.cola = queue.Queue()
         self._cola_ui = queue.Queue()
         self.vistas, self.vista_actual, self.nombre_actual = {}, None, None
 
-        root.title('PREVÉ · Yuju Store')
+        root.title(f'PREVÉ · {dt.empresa_nombre()}')  # FIX (Fase 3): empresa configurada
         root.geometry(f'{S(1240)}x{S(800)}')
         root.minsize(S(1020), S(660))
         root.configure(bg=BG)
@@ -488,6 +488,33 @@ class PreveApp:
         self._poll_ui()
         self.ir('inicio')
         self.root.after(300, self._avisar_ciclo_corrupto)
+        # Fase 3: si la configuración inicial no está completa, se abre el asistente
+        if not dt.Config.actual().get('wizard_completado'):
+            self.root.after(500, self.abrir_asistente)
+
+    def abrir_asistente(self, paso=0):
+        from preve_wizard import Asistente
+        Asistente(self.root, al_terminar=self._config_cambiada, paso_inicial=paso)
+
+    def _config_cambiada(self):
+        """Tras el asistente o el panel de Configuración: recargar todo lo que depende de la configuración."""
+        dt.Config.actual().invalidar()
+        self.cfg = dt.cargar_config()
+        if self.sucursal not in dt.sucursales():
+            self.sucursal = self.cfg['sucursal'] if self.cfg['sucursal'] in dt.sucursales() else dt.sucursales()[0]
+            self.btn_suc.set_text(f'{self.sucursal} ▾')
+        self.root.title(f'PREVÉ · {dt.empresa_nombre()}')
+        self.lbl_empresa.config(text=dt.empresa_nombre())
+        self.btn_usuario.set_text(f'{self.cfg["usuario"]} ▾')
+        self.recargar_datos()
+        sim = self.vistas.pop('simular', None)        # sus sliders dependen del ciclo configurado
+        if sim is not None:
+            if sim is self.vista_actual:
+                sim.pack_forget()
+                self.vista_actual = None
+            sim.destroy()
+        self.refrescar()
+        self.toast('Configuración guardada', 'ok')
 
     # ── estructura ─────────────────────────────────────────
     def _construir(self):
@@ -502,7 +529,8 @@ class PreveApp:
         logo.pack(side='left', fill='y')
         logo.pack_propagate(False)
         label(logo, 'PREVÉ', 17, 'bold', ACCENT).pack(side='left', padx=(S(22), S(8)))
-        label(logo, 'Yuju Store', 9, color=TEXT_MUTED).pack(side='left', pady=(S(4), 0))
+        self.lbl_empresa = label(logo, dt.empresa_nombre(), 9, color=TEXT_MUTED)
+        self.lbl_empresa.pack(side='left', pady=(S(4), 0))
 
         buscar = tk.Frame(top, bg=BG, highlightthickness=1, highlightbackground=BORDER, cursor='hand2')
         buscar.pack(side='left', padx=S(12), pady=S(12), ipadx=S(6), ipady=S(2))
@@ -616,7 +644,7 @@ class PreveApp:
     # ── menús superiores ───────────────────────────────────
     def _menu_sucursal(self):
         m = menu(self.root)
-        for s in dt.SUCURSALES:
+        for s in dt.sucursales():
             m.add_command(label=('✓  ' if s == self.sucursal else '     ') + s,
                           command=lambda s=s: self.cambiar_sucursal(s))
         b = self.btn_suc

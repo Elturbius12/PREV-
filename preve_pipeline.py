@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from preve_utils import get_logger
+from preve_config import ParametrosModelo, normalizar_ubicacion
 
 warnings.filterwarnings('ignore')
 logger = get_logger('pipeline')
@@ -144,6 +145,34 @@ def deduplicar_entre_archivos(dfs):
     clave = [c for c in todo.columns if c not in _COLUMNAS_NUMERACION
              and not str(c).startswith(('Unnamed', '__'))] + ['__occ']
     return todo.drop_duplicates(subset=clave, keep='first').drop(columns='__occ').reset_index(drop=True)
+
+
+# Campo de PREVÉ → nombre de columna que usa internamente el pipeline (formato Negosy)
+COLUMNAS_VENTAS_CANONICAS = {'fecha': 'FECHA/HORA', 'codigo_barras': 'CÓDIGO DE BARRA', 'producto': 'PRODUCTO',
+                             'cantidad': 'CANTIDAD', 'precio': 'PRECIO X UNIDAD', 'sucursal': 'ALMACÉN'}
+CAMPOS_VENTAS_OBLIGATORIOS = ('fecha', 'codigo_barras', 'cantidad')
+
+
+def aplicar_mapeo_ventas(ventas, mapeo, log=print):
+    """Renombra las columnas del Excel de ventas según el mapeo configurado (campo → columna del archivo).
+
+    Raises: ValueError si falta una columna obligatoria (fecha, código de barras, cantidad).
+    """
+    mapeo = mapeo or {}
+    renombres, faltan = {}, []
+    for campo, canonica in COLUMNAS_VENTAS_CANONICAS.items():
+        origen = (mapeo.get(campo) or canonica).strip()
+        if origen in ventas.columns:
+            if origen != canonica:
+                renombres[origen] = canonica
+        elif canonica not in ventas.columns and campo in CAMPOS_VENTAS_OBLIGATORIOS:
+            faltan.append(f'{campo} (columna "{origen}")')
+    if faltan:
+        raise ValueError('El reporte de ventas no tiene estas columnas obligatorias: ' + ', '.join(faltan)
+                         + '. Revisa el mapeo de columnas en Configuración.')
+    if renombres:
+        log(f'Mapeo de columnas de ventas aplicado: {renombres}')
+    return ventas.rename(columns=renombres)
 
 
 def fecha_desde_nombre(path):
@@ -375,14 +404,19 @@ def _mapear_por_nombre(df, col_nombre, mapa_nombre_a_sku, log, nombre_fuente):
 # ---------------------------------------------------------------------------
 def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_bc_nombre_a_sku,
                       mapa_nombre_a_sku, fecha_ancla, log,
-                      ventas_son_salidas_de_almacen=False, compras_son_entradas_de_almacen=False):
+                      ventas_son_salidas_de_almacen=False, compras_son_entradas_de_almacen=False,
+                      almacenes_propios=None):
     """Reconstruye el stock diario hacia atrás desde el stock del listado (fecha_ancla).
 
     ventas_son_salidas_de_almacen: True si el ERP registra cada venta también como "Salida" de almacén.
         En ese caso las ventas NO se restan del stock (ya lo restan las salidas); siguen siendo la demanda.
     compras_son_entradas_de_almacen: ídem para compras y "Entrada" de almacén.
     fecha_ancla: fecha a la que corresponde el stock del listado. None = última transacción registrada.
+    almacenes_propios: ubicaciones (tiendas/almacenes) que forman la sucursal; los traslados entre ellas
+        se netean a 0. Por defecto, las de San José (Tienda + Almacén Juliaca).
     """
+    # FIX: antes SAN_JOSE_ALMACENES fijo para todas las sucursales; ahora viene de la configuración
+    propios = frozenset(normalizar_ubicacion(a) for a in (almacenes_propios or SAN_JOSE_ALMACENES))
     skus = dim['sku'].tolist()
 
     # ---- ventas: resta stock ----
@@ -431,8 +465,8 @@ def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_bc_
         if tipo in ('Salida', 'Salida de productos'):
             return -row['cantidad']
         if tipo == 'Traslado':
-            origen_sj = origen in SAN_JOSE_ALMACENES
-            destino_sj = destino in SAN_JOSE_ALMACENES
+            origen_sj = normalizar_ubicacion(origen) in propios
+            destino_sj = normalizar_ubicacion(destino) in propios
             if origen_sj and destino_sj:
                 return 0.0  # traslado interno San Jose <-> San Jose, neto cero
             if destino_sj and not origen_sj:
@@ -509,7 +543,9 @@ def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_bc_
 # ---------------------------------------------------------------------------
 # Etapa 4: panel semanal + segmentación ADI/CV2 + clase ABC
 # ---------------------------------------------------------------------------
-def construir_panel_y_segmentacion(stock, ventas_diarias, dim, log):
+def construir_panel_y_segmentacion(stock, ventas_diarias, dim, log, params=None):
+    # FIX: umbrales ADI/CV², semanas de lanzamiento e IGV desde la configuración (antes fijos)
+    p = params or ParametrosModelo()
     ventas_diarias = ventas_diarias.copy()
     ventas_diarias['fecha'] = pd.to_datetime(ventas_diarias['fecha'])
     ventas_diarias['unidades'] = -ventas_diarias['mov']
@@ -548,14 +584,14 @@ def construir_panel_y_segmentacion(stock, ventas_diarias, dim, log):
             (pd.Timestamp(fecha_fin) - fecha_1ra).days / 7.0 if pd.notna(fecha_1ra) else np.nan
         )
 
-        if pd.isna(fecha_1ra) or semanas_desde_lanz < SEMANAS_LANZAMIENTO:
+        if pd.isna(fecha_1ra) or semanas_desde_lanz < p.semanas_lanzamiento:
             modelo, segmento, adi, cv2 = 'CatBoost', 'Lanzamiento nuevo (<13 sem.)', np.nan, np.nan
         elif n_con_venta < 2:
             modelo, segmento, adi, cv2 = 'Croston-TSB', 'Sin historia suficiente', np.nan, np.nan
         else:
             adi = n_semanas_obs / n_con_venta
             cv2 = (np.std(con_venta) / np.mean(con_venta)) ** 2 if np.mean(con_venta) > 0 else np.nan
-            if adi <= ADI_UMBRAL and cv2 <= CV2_UMBRAL:
+            if adi <= p.adi_umbral and cv2 <= p.cv2_umbral:
                 modelo, segmento = 'LightGBM', 'Regular / alta rotación'
             else:
                 modelo, segmento = 'Croston-TSB', 'Intermitente'
@@ -576,7 +612,7 @@ def construir_panel_y_segmentacion(stock, ventas_diarias, dim, log):
         if pd.isna(costo) or pd.isna(precio):
             margen.append(np.nan)
         else:
-            margen.append((precio / 1.18 - costo) * unid)
+            margen.append((precio / p.igv_factor - costo) * unid)
     dimx['margen_total'] = margen
     dimx_sorted = dimx.sort_values('margen_total', ascending=False)
     dimx_sorted['margen_total'] = dimx_sorted['margen_total'].fillna(0)
@@ -623,10 +659,15 @@ def construir_features_lgb(sub):
     return sub, [f'ventas_{w}s' for w in VENTANAS_LGB]
 
 
-def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log):
+def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log, params=None):
     import lightgbm as lgb
     from catboost import CatBoostRegressor
     from statsforecast.models import TSB
+
+    # FIX: horizonte e hiperparámetros desde la configuración (antes fijos en el código)
+    p = params or ParametrosModelo()
+    hs = p.horizonte_semanas                 # horizonte real en semanas (141 d → 20.14)
+    ht = max(1, int(round(hs)))              # horizonte entero para el target de LightGBM
 
     panel_full = panel_full.merge(segmentacion[['sku', 'modelo_asignado']], on='sku', how='left')
     resultados = []
@@ -640,18 +681,18 @@ def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log):
             pred, std = 0.0, 0.0
         else:
             try:
-                m = TSB(alpha_d=0.1, alpha_p=0.1)
+                m = TSB(**p.tsb_params)
                 m.fit(serie)
-                fc = m.predict(h=HORIZONTE_SEMANAS_TARGET)
+                fc = m.predict(h=ht)
                 pred = float(np.mean(fc['mean']))
                 std = float(np.std(serie))
             except (ValueError, ZeroDivisionError, FloatingPointError, KeyError) as e:
                 # FIX: antes except Exception silencioso; ahora se registra qué SKU cae al promedio simple
                 logger.warning('Croston-TSB falló para %s (%s); se usa el promedio simple', sku, e)
                 pred, std = float(np.mean(serie)), float(np.std(serie))
-        p50 = pred * HORIZONTE_SEMANAS
-        p10 = max(0.0, pred - 1.2816 * std) * HORIZONTE_SEMANAS
-        p90 = (pred + 1.2816 * std) * HORIZONTE_SEMANAS
+        p50 = pred * hs
+        p10 = max(0.0, pred - 1.2816 * std) * hs
+        p90 = (pred + 1.2816 * std) * hs
         resultados.append({'sku': sku, 'demanda_p10_141d': p10, 'demanda_p50_141d': p50, 'demanda_p90_141d': p90})
 
     # ---------- LightGBM (regular / alta rotación) ----------
@@ -659,20 +700,19 @@ def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log):
     log(f'Entrenando LightGBM para {len(skus_lgb)} SKU...')
     if skus_lgb:
         sub, feat_cols = construir_features_lgb(panel_full[panel_full.sku.isin(skus_lgb)])
-        h = HORIZONTE_SEMANAS_TARGET
+        h = ht
         sub['y_20s'] = sub.groupby('sku')['unidades_venta_neta'].transform(
             lambda x: construir_target_horizonte(x, h))
         train = sub.dropna(subset=feat_cols + ['y_20s'])
         if len(train) > 50:
-            model = lgb.LGBMRegressor(n_estimators=200, learning_rate=0.05, max_depth=6,
-                                       min_child_samples=10, random_state=42, verbosity=-1)
+            model = lgb.LGBMRegressor(**{'verbosity': -1, **p.lgbm_params})
             model.fit(train[feat_cols], train['y_20s'])
             resid_std = float(np.std(model.predict(train[feat_cols]) - train['y_20s']))
             latest = sub.sort_values('semana_inicio').groupby('sku').tail(1)
             latest = latest.dropna(subset=feat_cols)
             # FIX: el target cubre h semanas enteras; se reescala al horizonte real (20.14 sem)
             # para que LightGBM, Croston y CatBoost expresen la demanda en el mismo horizonte
-            escala = HORIZONTE_SEMANAS / h
+            escala = hs / h
             resid_std *= escala
             preds = np.clip(model.predict(latest[feat_cols]), 0, None) * escala
             for sku, p50 in zip(latest['sku'], preds):
@@ -711,16 +751,15 @@ def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log):
         train = base.dropna(subset=num_cols + ['y'])
         train = train[train['n_semanas'].fillna(0) >= 4]
         if len(train) > 30:
-            model = CatBoostRegressor(iterations=200, learning_rate=0.05, depth=6, cat_features=cat_cols,
-                                       random_seed=42, verbose=False)
+            model = CatBoostRegressor(**{'verbose': False, **p.catboost_params, 'cat_features': cat_cols})
             model.fit(train[feat_cols], train['y'])
             resid_std = float(np.std(model.predict(train[feat_cols]) - train['y']))
             pred_base = base.dropna(subset=num_cols).copy()
             pred_base['pred_sem'] = np.clip(model.predict(pred_base[feat_cols]), 0, None)
             for _, r in pred_base.iterrows():
-                p50 = r['pred_sem'] * HORIZONTE_SEMANAS
+                p50 = r['pred_sem'] * hs
                 # Incertidumbre escala con sqrt(semanas) para datos independientes
-                sigma_horizonte = resid_std * HORIZONTE_SEMANAS ** 0.5
+                sigma_horizonte = resid_std * hs ** 0.5
                 p10 = max(0, p50 - 1.2816 * sigma_horizonte)
                 p90 = p50 + 1.2816 * sigma_horizonte
                 resultados.append({'sku': r['sku'], 'demanda_p10_141d': p10, 'demanda_p50_141d': p50, 'demanda_p90_141d': p90})
@@ -855,14 +894,20 @@ def cargar_ordenes_abiertas(carpeta):
 def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fecha_fin, log,
                            compras_raw=None, mapa_bc_a_sku=None,
                            horizonte_semanas_override=None, stock_en_transito=None,
-                           lead_time_dias=LEAD_TIME_DIAS_INT):
+                           lead_time_dias=None, params=None):
     """Calcula ROP, nivel objetivo y cantidad a pedir por SKU.
 
-    ROP (punto de reorden) = demanda durante el lead time + stock de seguridad.
-    Nivel objetivo         = demanda del horizonte (revisión + lead time) + stock de seguridad.
-    Cantidad a pedir       = max(0, nivel objetivo − stock actual − stock en tránsito).
+    Stock de seguridad (SS) = z · σ de la demanda del horizonte (revisión + lead time).
+    ROP (punto de reorden)  = demanda durante el lead time + SS · √(lead time / horizonte).
+    Nivel objetivo          = demanda del horizonte + SS.
+    Cantidad a pedir        = max(0, nivel objetivo − stock actual − stock en tránsito).
     stock_en_transito: Series sku → unidades pedidas y aún no recibidas (ver cargar_ordenes_abiertas).
+    params: ParametrosModelo (horizonte base, lead time, IGV, Z); por defecto los valores originales.
     """
+    p = params or ParametrosModelo()
+    if lead_time_dias is None:
+        lead_time_dias = p.lead_time_dias
+    hs_base = p.horizonte_semanas
     fecha_stock_actual = stock.index.max()
     stock_actual = stock.loc[fecha_stock_actual].rename('stock_actual').reset_index()
     stock_actual.columns = ['sku', 'stock_actual']
@@ -875,9 +920,9 @@ def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fec
     df = df.merge(dim[['sku', 'nombre', 'categoria', 'costo_puesto_almacen_pen', 'precio_regular_pen']], on='sku', how='left')
 
     # --- Reescalar demanda si se usa un horizonte distinto al estándar (141d) ---
-    _hz = horizonte_semanas_override or HORIZONTE_SEMANAS
-    if horizonte_semanas_override and horizonte_semanas_override != HORIZONTE_SEMANAS:
-        factor = horizonte_semanas_override / HORIZONTE_SEMANAS
+    _hz = horizonte_semanas_override or hs_base
+    if horizonte_semanas_override and horizonte_semanas_override != hs_base:
+        factor = horizonte_semanas_override / hs_base
         for col in ['demanda_p50_141d', 'demanda_p10_141d', 'demanda_p90_141d']:
             if col in df.columns:
                 df[col] = (df[col] * factor).round(1)
@@ -887,7 +932,8 @@ def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fec
     # --- Margen porcentual por producto ---
     df['margen_pct'] = np.where(
         df['precio_regular_pen'].notna() & df['costo_puesto_almacen_pen'].notna() & (df['precio_regular_pen'] > 0),
-        (df['precio_regular_pen'] / 1.18 - df['costo_puesto_almacen_pen']) / (df['precio_regular_pen'] / 1.18),
+        (df['precio_regular_pen'] / p.igv_factor - df['costo_puesto_almacen_pen'])
+        / (df['precio_regular_pen'] / p.igv_factor),
         0
     )
 
@@ -910,7 +956,8 @@ def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fec
     df['tendencia_venta'] = df['tendencia_venta'].fillna(0)
 
     # --- Stock de seguridad y punto de reorden ---
-    df['z'] = df['clase_abc'].map(Z_NIVEL_SERVICIO).fillna(Z_NIVEL_SERVICIO['C'])
+    z = p.z_nivel_servicio
+    df['z'] = df['clase_abc'].map(z).fillna(z.get('C', min(z.values())))
     df['sigma_demanda_141d'] = ((df['demanda_p90_141d'] - df['demanda_p50_141d']) / 1.2816).clip(lower=0)
     df['stock_seguridad'] = (df['z'] * df['sigma_demanda_141d']).clip(lower=0)
     # FIX: stock en tránsito real (órdenes abiertas) en vez de 0.0 fijo
@@ -919,7 +966,10 @@ def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fec
     # FIX: ROP y nivel objetivo son conceptos distintos (antes "rop" era el nivel objetivo)
     horizonte_dias = _hz * 7.0
     df['demanda_lead_time'] = df['demanda_p50_141d'] * lead_time_dias / horizonte_dias
-    df['rop'] = df['demanda_lead_time'] + df['stock_seguridad']
+    # FIX: el SS se calcula para todo el horizonte; para el ROP solo importa el riesgo durante el
+    # lead time, así que se escala por √(LT/H) (σ crece con la raíz del tiempo)
+    df['stock_seguridad_lead_time'] = df['stock_seguridad'] * np.sqrt(min(1.0, lead_time_dias / horizonte_dias))
+    df['rop'] = df['demanda_lead_time'] + df['stock_seguridad_lead_time']
     df['nivel_objetivo'] = df['demanda_p50_141d'] + df['stock_seguridad']
     df['stock_actual'] = df['stock_actual'].fillna(0)
     df['cantidad_a_pedir'] = (df['nivel_objetivo'] - df['stock_actual']

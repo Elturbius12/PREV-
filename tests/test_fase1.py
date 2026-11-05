@@ -175,7 +175,8 @@ def test_1_5_rop_y_nivel_objetivo_son_distintos(log):
     r = rec.iloc[0]
     ss = r['stock_seguridad']
     assert r['demanda_lead_time'] == pytest.approx(36.0)        # 141 u en 141 días → 1/día
-    assert r['rop'] == pytest.approx(36.0 + ss)
+    # Fase 3: el SS del ROP se escala a √(LT/H)
+    assert r['rop'] == pytest.approx(36.0 + ss * np.sqrt(36 / 141))
     assert r['nivel_objetivo'] == pytest.approx(141.0 + ss)
     assert r['cantidad_a_pedir'] == round(141.0 + ss)
     assert r['compra_sugerida_unid'] == r['cantidad_a_pedir']    # alias para la UI
@@ -367,10 +368,12 @@ def test_a15_compras_con_otro_formato_de_fecha_no_se_pierden(log):
 
 
 def test_1_9_config_corrupto_se_respalda(tmp_path, monkeypatch, log):
+    import preve_config
     import preve_datos as dt
     ruta = tmp_path / 'preve_config.json'
     ruta.write_text('{esto no es json', encoding='utf-8')
-    monkeypatch.setattr(dt, '_CONFIG_PATH', str(ruta))
+    # Fase 3: el preve_config.json antiguo lo importa preve_config (una vez) a la base
+    monkeypatch.setattr(preve_config, 'RUTA_CONFIG_JSON', str(ruta))
     cfg = dt.cargar_config()
     assert cfg['usuario'] == dt.config_defecto()['usuario']
     respaldos = [p for p in os.listdir(tmp_path) if p.startswith('preve_config.json.corrupto')]

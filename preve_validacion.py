@@ -171,7 +171,7 @@ def analisis_contrafactual(metricas_sku, log=print):
 # 3. Estimación de ROI
 # ──────────────────────────────────────────────────────────
 
-def estimar_roi(metricas_sku, contrafactual, resumen_contra, log=print):
+def estimar_roi(metricas_sku, contrafactual, resumen_contra, log=print, igv_factor=1.18):
     """Estima el ROI de usar PREVÉ.
 
     Componentes del beneficio:
@@ -198,7 +198,8 @@ def estimar_roi(metricas_sku, contrafactual, resumen_contra, log=print):
     else:
         precio = np.full(len(df), np.nan)
     costo_arr = costo.to_numpy(dtype=float)
-    precio_neto = np.where(~np.isnan(precio), precio / 1.18,
+    # FIX (Fase 3): IGV de la empresa configurada (antes 1.18 fijo)
+    precio_neto = np.where(~np.isnan(precio), precio / igv_factor,
                            costo_arr * 1.3)  # margen estimado si no hay precio
     margen_unitario = pd.Series(precio_neto - costo_arr, index=df.index)
     df['venta_recuperada_valor'] = unidades_salvadas * margen_unitario
@@ -336,7 +337,8 @@ def generar_scorecard_excel(metricas_sku, agregadas, resumen_contra, roi, carpet
 # 5. Función orquestadora de validación
 # ──────────────────────────────────────────────────────────
 
-def generar_scorecard(carpeta_salida, recomendacion_anterior, ventas_reales_periodo, log=print):
+def generar_scorecard(carpeta_salida, recomendacion_anterior, ventas_reales_periodo, log=print,
+                      igv_factor=1.18):
     """Ejecuta todo el proceso de validación y genera el Excel scorecard.
 
     Args:
@@ -357,7 +359,7 @@ def generar_scorecard(carpeta_salida, recomendacion_anterior, ventas_reales_peri
     contrafactual_df, resumen_contra = analisis_contrafactual(metricas_sku, log)
 
     log('Validación 3/3 — Estimación de ROI...')
-    roi = estimar_roi(metricas_sku, contrafactual_df, resumen_contra, log)
+    roi = estimar_roi(metricas_sku, contrafactual_df, resumen_contra, log, igv_factor=igv_factor)
 
     log('Generando Excel scorecard...')
     path = generar_scorecard_excel(contrafactual_df, agregadas, resumen_contra, roi, carpeta_salida, log)

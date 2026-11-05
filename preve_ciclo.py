@@ -2,20 +2,17 @@
 """
 Gestión del ciclo inteligente de compras de PREVÉ.
 
-Ciclo internacional: 105 días (revisión) + 36 días (lead time) = 141 días horizonte.
-Ciclo local:         30 días (revisión) + 10 días (lead time) =  40 días horizonte.
+La duración del ciclo, el lead time y el horizonte vienen de la tabla `ciclos_compra` (Fase 3);
+las constantes de abajo son solo los valores por defecto (ciclo internacional de Yuju Store).
 
-El usuario importa datos del ERP cada ~2 semanas (≈14 días).
-Cada importación genera:
-  - Un reporte de compra INTERNACIONAL con etiqueta según el momento del ciclo:
-      • PRELIMINAR  (día 1–42  del ciclo, importaciones 1–3)
-      • BORRADOR    (día 43–84, importaciones 4–6)
-      • FINAL       (día 85–105, importación 7+)
-  - Un reporte de compra LOCAL (horizonte 40d) con notas de compra para
-    proveedores locales, si hay productos que necesitan reposición a corto plazo.
+El usuario importa datos del ERP cada ~2 semanas. Cada importación genera un reporte con etiqueta
+según el momento del ciclo:
+    • PRELIMINAR  (primer 40% del ciclo; día 1–42 en un ciclo de 105)
+    • BORRADOR    (40%–80%; día 43–84)
+    • FINAL       (último 20%; día 85–105)
 
-El archivo de estado del ciclo se guarda en `ciclo_estado.json` dentro de la
-carpeta de salida para persistir entre ejecuciones.
+Estado del ciclo: con `sucursal` se guarda en la base (configuracion['ciclo_estado:<sucursal>']);
+sin `sucursal` (o si la base aún no lo tiene) se usa/importa `ciclo_estado.json` de la carpeta de salida.
 """
 import os
 import json
@@ -23,7 +20,7 @@ import datetime
 
 
 # ──────────────────────────────────────────────────────────
-# Constantes
+# Valores por defecto (los reales se leen de ciclos_compra)
 # ──────────────────────────────────────────────────────────
 CICLO_INTERNACIONAL_DIAS = 105
 LEAD_TIME_INTERNACIONAL  = 36
@@ -35,29 +32,36 @@ HORIZONTE_LOCAL   = CICLO_LOCAL_DIAS + LEAD_TIME_LOCAL  # 40
 
 INTERVALO_IMPORTACION = 14  # días entre importaciones
 
-# Umbrales para la etiqueta del reporte (en días del ciclo)
-_LIMITE_PRELIMINAR = 42   # día 1–42
-_LIMITE_BORRADOR   = 84   # día 43–84
-# día 85–105 → FINAL
+# Fracciones del ciclo para la etiqueta del reporte
+FRACCION_PRELIMINAR = 0.4
+FRACCION_BORRADOR = 0.8
 
 
 class CicloCorruptoError(RuntimeError):
-    """El archivo de estado del ciclo existe pero no se puede leer. Requiere intervención del usuario."""
+    """El estado del ciclo existe pero no se puede leer. Requiere intervención del usuario."""
+
+
+def limites_etiqueta(duracion_dias):
+    """(último día PRELIMINAR, último día BORRADOR) para un ciclo de esa duración. 105 → (42, 84)."""
+    return round(duracion_dias * FRACCION_PRELIMINAR), round(duracion_dias * FRACCION_BORRADOR)
 
 
 def _ruta_estado(carpeta_salida):
     return os.path.join(carpeta_salida, 'ciclo_estado.json')
 
 
-def cargar_estado_ciclo(carpeta_salida):
-    """Carga el estado del ciclo desde disco.
+def _clave(sucursal):
+    from database import slug
+    return f'ciclo_estado:{slug(sucursal)}'
 
-    Returns: dict, o None si el archivo no existe (primera vez).
-    Raises: CicloCorruptoError si el archivo existe pero está dañado.
-    """
-    ruta = _ruta_estado(carpeta_salida)
-    if not os.path.exists(ruta):
-        return None
+
+def _validar(estado, origen):
+    if not isinstance(estado, dict) or 'ciclo_inicio' not in estado:
+        raise CicloCorruptoError(f'El estado del ciclo de compras no tiene el formato esperado:\n{origen}')
+    return estado
+
+
+def _leer_json(ruta):
     # FIX: antes un archivo corrupto devolvía None y el ciclo se reiniciaba en #1, perdiendo el historial
     try:
         with open(ruta, 'r', encoding='utf-8') as f:
@@ -68,41 +72,65 @@ def cargar_estado_ciclo(carpeta_salida):
             f'Para no perder el número de ciclo, PREVÉ no lo reinicia automáticamente. Repáralo o '
             f'restáuralo desde una copia; si prefieres empezar un ciclo nuevo, renómbralo o bórralo.'
             f'\n\nDetalle: {e}') from e
-    if not isinstance(estado, dict) or 'ciclo_inicio' not in estado:
-        raise CicloCorruptoError(f'El archivo del ciclo de compras no tiene el formato esperado:\n{ruta}')
+    return _validar(estado, ruta)
+
+
+def cargar_estado_ciclo(carpeta_salida, sucursal=None):
+    """Carga el estado del ciclo.
+
+    Returns: dict, o None si todavía no hay ciclo (primera vez).
+    Raises: CicloCorruptoError si el estado existe pero está dañado.
+    """
+    if sucursal:
+        from database import Database
+        db = Database.default()
+        estado = db.get_config(_clave(sucursal))
+        if estado is not None:
+            return _validar(estado, f'base de datos ({_clave(sucursal)})')
+    ruta = _ruta_estado(carpeta_salida) if carpeta_salida else None
+    if not ruta or not os.path.exists(ruta):
+        return None
+    estado = _leer_json(ruta)
+    if sucursal:
+        # FIX (Fase 3): el ciclo_estado.json antiguo se importa a la base una sola vez
+        db.set_config(_clave(sucursal), estado, descripcion='Estado del ciclo (importado de ciclo_estado.json)')
     return estado
 
 
-def guardar_estado_ciclo(carpeta_salida, estado):
-    """Persiste el estado del ciclo en disco."""
-    ruta = _ruta_estado(carpeta_salida)
-    with open(ruta, 'w', encoding='utf-8') as f:
+def guardar_estado_ciclo(carpeta_salida, estado, sucursal=None):
+    """Persiste el estado del ciclo (en la base si hay sucursal; si no, en ciclo_estado.json)."""
+    if sucursal:
+        from database import Database
+        Database.default().set_config(_clave(sucursal), json.loads(json.dumps(estado, default=str)))
+        return
+    with open(_ruta_estado(carpeta_salida), 'w', encoding='utf-8') as f:
         json.dump(estado, f, ensure_ascii=False, indent=2, default=str)
 
 
-def iniciar_ciclo(carpeta_salida, fecha_inicio=None, guardar=True, anterior=None):
-    """Inicia un nuevo ciclo de compras internacionales.
+def iniciar_ciclo(carpeta_salida, fecha_inicio=None, guardar=True, anterior=None, sucursal=None,
+                  duracion_dias=CICLO_INTERNACIONAL_DIAS):
+    """Inicia un nuevo ciclo de compras.
 
-    anterior: estado del ciclo previo (si se omite, se lee de disco) para continuar la numeración.
+    anterior: estado del ciclo previo (si se omite, se lee) para continuar la numeración.
     """
     fecha_inicio = fecha_inicio or datetime.date.today()
     estado = {
         'ciclo_inicio': str(fecha_inicio),
-        'ciclo_dias': CICLO_INTERNACIONAL_DIAS,
+        'ciclo_dias': int(duracion_dias),
         'importaciones': [],
         'ciclo_numero': 1,
     }
-    # Buscar ciclo anterior para incrementar número
     if anterior is None:
-        anterior = cargar_estado_ciclo(carpeta_salida)
+        anterior = cargar_estado_ciclo(carpeta_salida, sucursal)
     if anterior and 'ciclo_numero' in anterior:
         estado['ciclo_numero'] = anterior['ciclo_numero'] + 1
     if guardar:
-        guardar_estado_ciclo(carpeta_salida, estado)
+        guardar_estado_ciclo(carpeta_salida, estado, sucursal)
     return estado
 
 
-def registrar_importacion(carpeta_salida, fecha=None, guardar=True):
+def registrar_importacion(carpeta_salida, fecha=None, guardar=True, sucursal=None,
+                          duracion_dias=CICLO_INTERNACIONAL_DIAS):
     """Registra una nueva importación de datos en el ciclo actual.
 
     guardar=False devuelve la misma información sin escribir nada (vista previa al iniciar el análisis;
@@ -111,29 +139,31 @@ def registrar_importacion(carpeta_salida, fecha=None, guardar=True):
 
     Returns:
         dict con: dia_ciclo, importacion_num, etiqueta, dias_restantes,
-                  fecha_limite_pedido, generar_local
+                  fecha_limite_pedido, generar_local, ciclo_numero, ciclo_inicio, ciclo_dias
     """
     fecha = fecha or datetime.date.today()
-    estado = cargar_estado_ciclo(carpeta_salida)
+    duracion_dias = int(duracion_dias)
+    estado = cargar_estado_ciclo(carpeta_salida, sucursal)
 
     if estado is None:
         # Primera vez — iniciar ciclo automáticamente
-        estado = iniciar_ciclo(carpeta_salida, fecha, guardar=False, anterior={})
+        estado = iniciar_ciclo(carpeta_salida, fecha, guardar=False, anterior={}, sucursal=sucursal,
+                               duracion_dias=duracion_dias)
 
     inicio = datetime.date.fromisoformat(estado['ciclo_inicio'])
     dia_ciclo = (fecha - inicio).days + 1  # 1-based
 
     # Si pasó el ciclo, iniciar uno nuevo automáticamente
-    if dia_ciclo > CICLO_INTERNACIONAL_DIAS:
-        # FIX: el ciclo nuevo arranca donde terminó el anterior (inicio + k·105), no el día de la
+    if dia_ciclo > duracion_dias:
+        # FIX: el ciclo nuevo arranca donde terminó el anterior (inicio + k·duración), no el día de la
         # importación; si se saltaron ciclos enteros, la numeración avanza igual
-        saltos = (dia_ciclo - 1) // CICLO_INTERNACIONAL_DIAS
-        inicio = inicio + datetime.timedelta(days=saltos * CICLO_INTERNACIONAL_DIAS)
+        saltos = (dia_ciclo - 1) // duracion_dias
+        inicio = inicio + datetime.timedelta(days=saltos * duracion_dias)
         anterior = dict(estado, ciclo_numero=estado.get('ciclo_numero', 1) + saltos - 1)
-        estado = iniciar_ciclo(carpeta_salida, inicio, guardar=False, anterior=anterior)
+        estado = iniciar_ciclo(carpeta_salida, inicio, guardar=False, anterior=anterior, sucursal=sucursal,
+                               duracion_dias=duracion_dias)
         dia_ciclo = (fecha - inicio).days + 1
 
-    # Registrar importación
     # FIX: repetir el análisis el mismo día no cuenta como una importación nueva
     importacion = {
         'fecha': str(fecha),
@@ -144,21 +174,23 @@ def registrar_importacion(carpeta_salida, fecha=None, guardar=True):
     importacion_num = len(estado['importaciones'])
 
     # Etiqueta del reporte
-    if dia_ciclo <= _LIMITE_PRELIMINAR:
+    lim_pre, lim_bor = limites_etiqueta(duracion_dias)
+    if dia_ciclo <= lim_pre:
         etiqueta = 'PRELIMINAR'
-    elif dia_ciclo <= _LIMITE_BORRADOR:
+    elif dia_ciclo <= lim_bor:
         etiqueta = 'BORRADOR'
     else:
         etiqueta = 'FINAL'
 
-    dias_restantes = max(0, CICLO_INTERNACIONAL_DIAS - dia_ciclo)
-    fecha_limite = inicio + datetime.timedelta(days=CICLO_INTERNACIONAL_DIAS - 1)
+    dias_restantes = max(0, duracion_dias - dia_ciclo)
+    fecha_limite = inicio + datetime.timedelta(days=duracion_dias - 1)
 
     # ¿Generar reporte local? Sí, siempre que se importan datos
     generar_local = True
 
     if guardar:
-        guardar_estado_ciclo(carpeta_salida, estado)
+        estado['ciclo_dias'] = duracion_dias
+        guardar_estado_ciclo(carpeta_salida, estado, sucursal)
 
     return {
         'dia_ciclo': dia_ciclo,
@@ -169,6 +201,7 @@ def registrar_importacion(carpeta_salida, fecha=None, guardar=True):
         'generar_local': generar_local,
         'ciclo_numero': estado.get('ciclo_numero', 1),
         'ciclo_inicio': estado['ciclo_inicio'],
+        'ciclo_dias': duracion_dias,
     }
 
 
@@ -179,14 +212,15 @@ def resumen_ciclo_texto(info_ciclo):
     r = info_ciclo['dias_restantes']
     n = info_ciclo['importacion_num']
     c = info_ciclo['ciclo_numero']
+    total = info_ciclo.get('ciclo_dias', CICLO_INTERNACIONAL_DIAS)
 
-    barra = min(100, int(d / CICLO_INTERNACIONAL_DIAS * 100))
+    barra = min(100, int(d / total * 100))
 
     lineas = [
-        f'Ciclo #{c} — Día {d} de {CICLO_INTERNACIONAL_DIAS}  [{barra}%]',
+        f'Ciclo #{c} — Día {d} de {total}  [{barra}%]',
         f'Importación #{n} del ciclo',
         f'Tipo de reporte: {e}',
-        f'Días restantes para el pedido internacional: {r}',
+        f'Días restantes para el pedido: {r}',
         f'Fecha límite del pedido: {info_ciclo["fecha_limite_pedido"]}',
     ]
 

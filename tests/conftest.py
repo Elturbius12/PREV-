@@ -7,10 +7,15 @@ import pytest
 def base_de_datos_aislada(tmp_path, monkeypatch):
     """Cada test usa su propio preve.db temporal (nunca la base real de la app)."""
     from database import Database
+    import preve_config
     Database.cerrar_todas()
+    preve_config.Config.reiniciar()
     monkeypatch.setenv('PREVE_DB_URL', 'sqlite:///' + str(tmp_path / 'preve_test.db').replace('\\', '/'))
+    # nunca leer el preve_config.json real de la app
+    monkeypatch.setattr(preve_config, 'RUTA_CONFIG_JSON', str(tmp_path / 'no_existe_preve_config.json'))
     yield
     Database.cerrar_todas()
+    preve_config.Config.reiniciar()
 
 
 @pytest.fixture

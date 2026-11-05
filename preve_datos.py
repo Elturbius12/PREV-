@@ -11,91 +11,97 @@ Regla de la casa: nunca inventa un número. Todo KPI sale de columnas reales
 del CSV; si no se puede calcular, se devuelve None y la interfaz muestra "—".
 """
 import os
-import json
-import shutil
 from sqlalchemy.exc import SQLAlchemyError
 import datetime
 import numpy as np
 import pandas as pd
 
 import preve_historial as hist
-from preve_ciclo import cargar_estado_ciclo, CicloCorruptoError, CICLO_INTERNACIONAL_DIAS, LEAD_TIME_INTERNACIONAL
+from preve_ciclo import cargar_estado_ciclo, CicloCorruptoError
+from preve_config import Config
 from preve_utils import get_logger
 
 logger = get_logger('datos')
 
-HORIZONTE_DIAS = 141
-LEAD = LEAD_TIME_INTERNACIONAL
-SUCURSALES = ['San José', 'Santa Barbara', 'Lima']
-
-_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'preve_config.json')
 _MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto',
           'septiembre', 'octubre', 'noviembre', 'diciembre']
 
 
 # ══════════════════════════════════════════════════════════════════
-# Configuración persistente (carpetas, sucursal activa, usuario)
+# Parámetros de negocio (Fase 3: vienen de la configuración, ya no están fijos)
 # ══════════════════════════════════════════════════════════════════
+def lead_time():
+    """Lead time del ciclo principal, en días."""
+    return int(Config.actual().ciclo_principal['lead_time_dias'])
+
+
+def horizonte():
+    """Horizonte de cobertura del ciclo principal, en días."""
+    return int(Config.actual().ciclo_principal['horizonte_pronostico_dias'])
+
+
+def duracion_ciclo():
+    return int(Config.actual().ciclo_principal['duracion_dias'])
+
+
+def igv():
+    return Config.actual().empresa['igv_factor']
+
+
+def empresa_nombre():
+    return Config.actual().empresa['nombre']
+
+
+def sucursales():
+    return Config.actual().nombres_sucursales or ['Principal']
+
+
+def __getattr__(nombre):
+    # FIX: compatibilidad con dt.LEAD / dt.HORIZONTE_DIAS / dt.SUCURSALES, ahora calculados desde la config
+    dinamicos = {'LEAD': lead_time, 'HORIZONTE_DIAS': horizonte, 'SUCURSALES': sucursales}
+    if nombre in dinamicos:
+        return dinamicos[nombre]()
+    raise AttributeError(nombre)
+
+
+# ══════════════════════════════════════════════════════════════════
+# Configuración de la interfaz (fachada en forma de dict sobre Config)
+# ══════════════════════════════════════════════════════════════════
+_MAPA_CFG = {'usuario': 'usuario_nombre', 'sucursal': 'sucursal_activa', 'ultima_duracion_s': 'ultima_duracion_s',
+             'pasos_s': 'pasos_s', 'ventas_son_salidas_de_almacen': 'ventas_son_salidas_de_almacen',
+             'compras_son_entradas_de_almacen': 'compras_son_entradas_de_almacen'}
+
+
 def config_defecto():
-    return {
-        'usuario': 'Prevedor',
-        'sucursal': 'San José',
-        'sucursales': {s: {'entrada': '', 'salida': ''} for s in SUCURSALES},
-        'ultima_duracion_s': None,
-        # True si el ERP registra cada venta también como "Salida" de almacén (evita doble descuento).
-        # Con los reportes de Yuju (nov-2026) las salidas son ajustes manuales (~1% de las ventas): False.
-        'ventas_son_salidas_de_almacen': False,
-        # Ídem para compras y "Entrada" de almacén.
-        'compras_son_entradas_de_almacen': False,
-    }
-
-
-def _respaldar_corrupto(ruta):
-    """Copia un archivo ilegible a <ruta>.corrupto-<timestamp> antes de que se sobrescriba."""
-    destino = f'{ruta}.corrupto-{datetime.datetime.now():%Y%m%d-%H%M%S}'
-    try:
-        shutil.copy2(ruta, destino)
-        logger.error('Configuración ilegible; respaldada en %s y se usan valores por defecto', destino)
-    except OSError:
-        logger.exception('No se pudo respaldar la configuración corrupta %s', ruta)
-    return destino
+    from preve_config import DEFAULTS
+    return {k: DEFAULTS[v][0] for k, v in _MAPA_CFG.items()} | {'sucursales': {}}
 
 
 def cargar_config():
-    cfg = config_defecto()
-    # FIX: antes cualquier error se silenciaba y el archivo corrupto se sobrescribía con los defaults
-    try:
-        with open(_CONFIG_PATH, 'r', encoding='utf-8') as f:
-            guardada = json.load(f)
-    except FileNotFoundError:
-        return cfg
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        _respaldar_corrupto(_CONFIG_PATH)
-        return cfg
-    except OSError:
-        logger.exception('No se pudo leer %s', _CONFIG_PATH)
-        return cfg
-    if not isinstance(guardada, dict):
-        _respaldar_corrupto(_CONFIG_PATH)
-        return cfg
-    for k, v in guardada.items():
-        if k == 'sucursales' and isinstance(v, dict):
-            for s, d in v.items():
-                cfg['sucursales'].setdefault(s, {'entrada': '', 'salida': ''}).update(d)
-        else:
-            cfg[k] = v
+    """Dict con usuario, sucursal, sucursales {nombre: {entrada, salida}}, tiempos y parámetros de stock.
+
+    FIX (Fase 3): la configuración vive en la base. Un preve_config.json antiguo se importa una vez
+    (y si está corrupto se respalda como .corrupto-* antes de seguir con los valores por defecto).
+    """
+    c = Config.actual()
+    c.invalidar()
+    cfg = {k: c.get(v) for k, v in _MAPA_CFG.items()}
+    cfg['sucursales'] = {s['nombre']: {'entrada': s['entrada'], 'salida': s['salida']}
+                         for s in c.sucursales if s['activa']}
     return cfg
 
 
 def guardar_config(cfg):
-    # FIX: escritura atómica (archivo temporal + reemplazo) y error registrado en el log
-    tmp = _CONFIG_PATH + '.tmp'
-    try:
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, _CONFIG_PATH)
-    except (OSError, TypeError, ValueError):
-        logger.exception('No se pudo guardar la configuración en %s', _CONFIG_PATH)
+    """Guarda en la base lo que la interfaz cambió (nombre, sucursal activa, carpetas, tiempos)."""
+    c = Config.actual()
+    for k, clave in _MAPA_CFG.items():
+        if k in cfg and cfg[k] != c.get(clave):
+            c.set(clave, cfg[k])
+    for nombre, carpetas in (cfg.get('sucursales') or {}).items():
+        actuales = c.carpetas(nombre)
+        for clave in ('entrada', 'salida'):
+            if carpetas.get(clave, '') != actuales.get(clave, ''):
+                c.set_carpeta(nombre, clave, carpetas.get(clave, ''))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -149,7 +155,8 @@ _NUM = ['stock_actual', 'demanda_p50_141d', 'demanda_p10_141d', 'demanda_p90_141
         'tendencia_venta']
 
 
-def derivar(df, lead=LEAD):
+def derivar(df, lead=None):
+    lead = lead_time() if lead is None else lead
     d = df.copy()
     for c in _NUM:
         d[c] = pd.to_numeric(d[c], errors='coerce') if c in d.columns else np.nan
@@ -163,8 +170,8 @@ def derivar(df, lead=LEAD):
             d[c] = False
         d[c] = d[c].astype(str).str.lower().isin(['true', '1'])
 
-    d['venta_sem'] = d['demanda_p50_141d'] / (HORIZONTE_DIAS / 7.0)
-    venta_dia = d['demanda_p50_141d'] / HORIZONTE_DIAS
+    d['venta_sem'] = d['demanda_p50_141d'] / (horizonte() / 7.0)
+    venta_dia = d['demanda_p50_141d'] / horizonte()
     stock_pos = d['stock_actual'].clip(lower=0)
     d['dias_stock'] = np.where(venta_dia > 0, stock_pos / venta_dia.replace(0, np.nan), np.inf)
 
@@ -199,8 +206,9 @@ def confianza_motivo(r):
     return 'Historia suficiente y rango de ventas estrecho.'
 
 
-def explicar(r, fecha_datos, lead=LEAD):
+def explicar(r, fecha_datos, lead=None):
     """Explicación en lenguaje natural de por qué PREVÉ recomienda lo que recomienda."""
+    lead = lead_time() if lead is None else lead
     venta = r['venta_sem']
     venta_t = f'{venta:.0f}' if venta >= 10 else (f'{venta:.1f}'.rstrip('0').rstrip('.') or '0')
     dias = r['dias_stock']
@@ -221,7 +229,7 @@ def explicar(r, fecha_datos, lead=LEAD):
                         f'antes de que llegue el pedido.')
             else:
                 txt += (f' Tu stock actual alcanza hasta el {fecha_larga(quiebre)}, pero necesitas cubrir '
-                        f'{HORIZONTE_DIAS} días más un colchón de seguridad.')
+                        f'{horizonte()} días más un colchón de seguridad.')
         return txt
 
     base = r['motivo_accion'] or 'Sin recomendación especial por ahora.'
@@ -264,7 +272,8 @@ class Datos:
                 self.df = None
         # FIX: un ciclo corrupto ya no se reinicia en silencio: se informa a la interfaz
         try:
-            self.ciclo = cargar_estado_ciclo(carpeta)
+            # Fase 3: estado del ciclo por sucursal en la base (importa ciclo_estado.json la primera vez)
+            self.ciclo = cargar_estado_ciclo(carpeta, self.sucursal)
         except CicloCorruptoError as e:
             self.error_ciclo = str(e)
             self.ciclo = None
@@ -336,14 +345,15 @@ class Datos:
         """Estado del ciclo calculado con la fecha de hoy."""
         if not self.ciclo or 'ciclo_inicio' not in self.ciclo:
             return None
+        total = int(self.ciclo.get('ciclo_dias') or duracion_ciclo())
         inicio = datetime.date.fromisoformat(self.ciclo['ciclo_inicio'])
         hoy = datetime.date.today()
         dia = (hoy - inicio).days + 1
-        limite = inicio + datetime.timedelta(days=CICLO_INTERNACIONAL_DIAS - 1)
+        limite = inicio + datetime.timedelta(days=total - 1)
         return {
             'numero': self.ciclo.get('ciclo_numero', 1),
-            'dia': max(1, min(dia, CICLO_INTERNACIONAL_DIAS)),
-            'dias_totales': CICLO_INTERNACIONAL_DIAS,
+            'dia': max(1, min(dia, total)),
+            'dias_totales': total,
             'dias_restantes': max(0, (limite - hoy).days),
             'limite': limite,
             'vencido': hoy > limite,
@@ -358,18 +368,18 @@ class Datos:
         con_costo = costo.notna()
 
         valor_stock = (d['stock_actual'].clip(lower=0) * costo)[con_costo].sum()
-        consumo_anual = (d['demanda_p50_141d'].clip(lower=0) * costo)[con_costo].sum() * (365.0 / HORIZONTE_DIAS)
+        consumo_anual = (d['demanda_p50_141d'].clip(lower=0) * costo)[con_costo].sum() * (365.0 / horizonte())
         rotacion = consumo_anual / valor_stock if valor_stock > 0 else None
 
         con_demanda = d['demanda_p50_141d'] > 0
-        riesgo = (con_demanda & (d['dias_stock'] <= LEAD)).sum()
+        riesgo = (con_demanda & (d['dias_stock'] <= lead_time())).sum()
         pct_riesgo = riesgo / con_demanda.sum() * 100 if con_demanda.sum() > 0 else None
 
         liq = d[(d['accion'] == 'LIQUIDAR') & con_costo]
         capital_muerto = (liq['stock_actual'].clip(lower=0) * liq['costo_puesto_almacen_pen']).sum()
 
         # Margen esperado: unidades que podrías vender (limitadas por stock + compra) × margen unitario sin IGV
-        precio_neto = d['precio_regular_pen'] / 1.18
+        precio_neto = d['precio_regular_pen'] / igv()
         ok = precio_neto.notna() & con_costo
         vendibles = np.minimum(d['demanda_p50_141d'].clip(lower=0),
                                d['stock_actual'].clip(lower=0) + d['compra_sugerida_unid'].fillna(0))
