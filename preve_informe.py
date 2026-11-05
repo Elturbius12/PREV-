@@ -19,6 +19,10 @@ import pandas as pd
 
 import preve_datos as dt
 from preve_datos import fmt_num, fmt_soles, fecha_larga
+# FIX: safe_int en vez de int() donde el valor puede ser NaN (antes ValueError abortaba el informe)
+from preve_utils import safe_int, get_logger
+
+logger = get_logger('informe')
 
 VERDE = '#2D7D5F'
 VERDE_OSC = '#1A2B23'
@@ -100,8 +104,9 @@ def _graficos(d, rec, carpeta_tmp):
             out['segmentos'] = os.path.join(carpeta_tmp, 'g_seg.png')
             fig.savefig(out['segmentos'], dpi=200)
             plt.close(fig)
-    except Exception:
-        pass
+    except (ImportError, OSError, ValueError, KeyError, TypeError):
+        # FIX: antes except Exception: pass; el informe sigue sin gráficos pero el motivo queda en el log
+        logger.exception('No se pudieron generar los gráficos del informe')
     return out
 
 
@@ -129,8 +134,9 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None):
     if os.path.exists(ruta_sp):
         try:
             sin_pron = len(pd.read_csv(ruta_sp))
-        except Exception:
-            pass
+        except (OSError, pd.errors.ParserError, pd.errors.EmptyDataError):
+            # FIX: antes except Exception: pass
+            logger.warning('No se pudo leer %s', ruta_sp, exc_info=True)
 
     meta = {'titulo': 'Informe de compras para gerencia', 'sucursal': sucursal,
             'subtitulo': f'Yuju Store · {sucursal}' + (f' · Ciclo #{ci["numero"]}' if ci else '')
@@ -228,7 +234,7 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None):
         t = rec.sort_values('costo_total_compra_pen', ascending=False).head(15)
         B.append(('table', ['Producto', 'Proveedor', 'Stock', 'Comprar', 'Inversión', 'Prioridad'],
                   [[_corto(r['nombre'], 38), _corto(r['proveedor_principal'] or '—', 22), fmt_num(r['stock_actual']),
-                    f'{int(r["compra_sugerida_unid"]):,}', fmt_soles(r['costo_total_compra_pen']),
+                    f'{safe_int(r["compra_sugerida_unid"]):,}', fmt_soles(r['costo_total_compra_pen']),
                     r['urgencia'].capitalize()] for _, r in t.iterrows()],
                   ['l', 'l', 'r', 'r', 'r', 'l'], [5.2, 3.2, 1.4, 1.6, 2.2, 1.9]))
         if 'proveedores' in graf:
@@ -240,7 +246,7 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None):
         if len(cat):
             B.append(('h2', 'Inversión por categoría'))
             B.append(('table', ['Categoría', 'Productos', 'Unidades', 'Inversión', '% del total'],
-                      [[_corto(i, 30), f'{int(r["prod"]):,}', f'{int(r["unid"]):,}', fmt_soles(r['inv']),
+                      [[_corto(i, 30), f'{safe_int(r["prod"]):,}', f'{safe_int(r["unid"]):,}', fmt_soles(r['inv']),
                         f'{_pct(r["inv"], inv_total):.0f}%' if inv_total else '—'] for i, r in cat.iterrows()],
                       ['l', 'r', 'r', 'r', 'r'], [5.5, 2.4, 2.4, 3.0, 2.2]))
 
@@ -256,7 +262,7 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None):
                        fecha_larga(d.fecha_ref + datetime.timedelta(days=float(r['dias_stock']))))
             filas.append([_corto(r['nombre'], 38), fmt_num(r['stock_actual']),
                           '—' if np.isinf(r['dias_stock']) else f'{r["dias_stock"]:.0f}', quiebre,
-                          f'{int(r["compra_sugerida_unid"]):,}', fmt_soles(r['costo_total_compra_pen'])])
+                          f'{safe_int(r["compra_sugerida_unid"]):,}', fmt_soles(r['costo_total_compra_pen'])])
         B.append(('table', ['Producto', 'Stock', 'Días de stock', 'Quiebre estimado', 'Comprar', 'Inversión'],
                   filas, ['l', 'r', 'r', 'l', 'r', 'r'], [5.2, 1.5, 2.0, 3.0, 1.6, 2.2]))
     else:
@@ -300,9 +306,9 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None):
         cambios = []
         for _, r in rec.iterrows():
             antes = d.previa_unidades(r['sku'])
-            ahora = int(r['compra_sugerida_unid'])
-            if antes is not None and int(antes) != ahora:
-                cambios.append((abs(ahora - int(antes)), r, int(antes), ahora))
+            ahora = safe_int(r['compra_sugerida_unid'])
+            if antes is not None and safe_int(antes) != ahora:
+                cambios.append((abs(ahora - safe_int(antes)), r, safe_int(antes), ahora))
         cambios.sort(key=lambda x: -x[0])
         if cambios:
             B.append(('table', ['Producto', 'Antes (u)', 'Ahora (u)', 'Cambio'],

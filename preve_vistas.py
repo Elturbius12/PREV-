@@ -14,6 +14,10 @@ from preve_ui import (S, f, Card, Btn, Chip, ProgressBar, Slider, ScrollFrame, S
                       OK, WARN, DANGER, WARN_BG, DANGER_BG, OK_BG)
 import preve_datos as dt
 from preve_datos import fmt_num, fmt_soles, fecha_larga
+# FIX: safe_int en vez de int() donde el valor puede ser NaN (antes ValueError rompía la vista)
+from preve_utils import safe_int, get_logger
+
+logger = get_logger('vistas')
 
 PADX = 32
 FILA_SEL = '#F3F8F5'
@@ -245,9 +249,9 @@ class VistaInicio(Vista):
             cambios = []
             for r in d.recompras().to_dict('records'):
                 antes = d.previa_unidades(r['sku'])
-                ahora = int(r['compra_sugerida_unid'])
-                if antes is not None and int(antes) != ahora:
-                    cambios.append((abs(ahora - int(antes)), r, int(antes), ahora))
+                ahora = safe_int(r['compra_sugerida_unid'])
+                if antes is not None and safe_int(antes) != ahora:
+                    cambios.append((abs(ahora - safe_int(antes)), r, safe_int(antes), ahora))
             cambios.sort(key=lambda x: -x[0])
             if cambios:
                 label(card.body, 'MAYORES CAMBIOS', 8, 'bold', TEXT_MUTED).pack(anchor='w', pady=(0, S(4)))
@@ -582,13 +586,13 @@ class VistaRecom(Vista):
               wraplength=S(250), justify='left').pack(anchor='w', pady=(S(2), S(10)))
         if r['accion'] == 'RECOMPRAR':
             antes = d.previa_unidades(sku)
-            ahora = int(r['compra_sugerida_unid'])
+            ahora = safe_int(r['compra_sugerida_unid'])
             label(der, 'VS. ANÁLISIS ANTERIOR', 8, 'bold', TEXT_MUTED, bg=bg).pack(anchor='w')
             if antes is None:
                 label(der, f'Este análisis: {ahora} u · antes: sin recomendación', 10, bg=bg, mono=True
                       ).pack(anchor='w')
             else:
-                label(der, f'Ahora {ahora} u · Antes {int(antes)} u ({ahora - int(antes):+d})', 10, bg=bg,
+                label(der, f'Ahora {ahora} u · Antes {safe_int(antes)} u ({ahora - safe_int(antes):+d})', 10, bg=bg,
                       mono=True).pack(anchor='w')
 
         # acciones
@@ -712,7 +716,7 @@ class VistaDecision(Vista):
               mono=True).pack(anchor='w', pady=(S(2), S(16)))
         nums = tk.Frame(b, bg=SURFACE)
         nums.pack(fill='x')
-        for i, (t, v, c) in enumerate((('Comprar', f'{int(r["compra_sugerida_unid"]):,} u', TEXT),
+        for i, (t, v, c) in enumerate((('Comprar', f'{safe_int(r["compra_sugerida_unid"]):,} u', TEXT),
                                        ('Inversión', fmt_soles(r['costo_total_compra_pen']), ACCENT),
                                        ('Stock hoy', fmt_num(r['stock_actual']), TEXT))):
             col = tk.Frame(nums, bg=SURFACE)
@@ -904,7 +908,7 @@ class VistaSimular(Vista):
                 dlt = row['delta_inversion']
                 label(fr, ('+' if dlt > 0 else '−') + fmt_soles(abs(dlt)), 10, 'bold', DANGER if dlt > 0 else OK,
                       mono=True).pack(side='right')
-                label(fr, f'{int(row["compra_orig"])} → {int(row["compra_sim"])} u    ', 9, color=TEXT_DIM,
+                label(fr, f'{safe_int(row["compra_orig"])} → {safe_int(row["compra_sim"])} u    ', 9, color=TEXT_DIM,
                       mono=True).pack(side='right')
                 tk.Frame(caja, bg=BORDER, height=1).pack(fill='x')
         self.app.toast('Simulación lista. Se guardó PREVE_Simulacion.xlsx', 'ok')
@@ -937,14 +941,19 @@ class VistaHistorial(Vista):
         self._token += 1
         token = self._token
         carpeta = self.app.datos.carpeta
+        sucursal = self.app.sucursal
 
         def trabajo():
             import time
+            import sqlite3
             import preve_historial as hist
             t0 = time.time()
             try:
-                df = hist.ejecuciones_con_diff(carpeta, 50) if carpeta else pd.DataFrame()
-            except Exception:
+                # FIX: historial filtrado por la sucursal activa
+                df = hist.ejecuciones_con_diff(carpeta, 50, sucursal=sucursal) if carpeta else pd.DataFrame()
+            except sqlite3.Error:
+                # FIX: antes except Exception silencioso
+                logger.exception('No se pudo leer el historial')
                 df = pd.DataFrame()
             time.sleep(max(0, 0.45 - (time.time() - t0)))      # que el esqueleto se alcance a ver
             return df

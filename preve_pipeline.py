@@ -32,7 +32,10 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from preve_utils import get_logger
+
 warnings.filterwarnings('ignore')
+logger = get_logger('pipeline')
 
 # ---------------------------------------------------------------------------
 # Parámetros de negocio (reales, confirmados con el dueño del negocio)
@@ -61,6 +64,20 @@ ADI_UMBRAL = 1.32
 CV2_UMBRAL = 0.49
 SEMANAS_LANZAMIENTO = 13
 
+# FIX: horizonte entero en semanas para el target de LightGBM (141 d ≈ 20 sem)
+HORIZONTE_SEMANAS_TARGET = int(round(HORIZONTE_DIAS / 7.0))
+
+COLUMNAS_CODIGO_BARRA = ('CODIGO BARRAS', 'CÓDIGO DE BARRA', 'COD. BARRA')
+# Columnas de numeración de fila del ERP: cambian entre exportaciones y no identifican la transacción
+_COLUMNAS_NUMERACION = {'N', 'Nº', 'N°', '#'}
+
+# Si más de esta fracción de las unidades vendidas aparece también como "Salida" de almacén,
+# probablemente el ERP registra cada venta como salida (doble descuento).
+UMBRAL_DOBLE_DESCUENTO = 0.8
+
+NOMBRE_ORDENES_ABIERTAS = 'ordenes_compra_abiertas.csv'
+COLUMNAS_ORDENES = ['sku', 'cantidad', 'proveedor', 'fecha_pedido', 'fecha_estimada_llegada', 'estado']
+
 
 # ---------------------------------------------------------------------------
 # Utilidades de lectura: los reportes del ERP tienen 1-2 filas de título
@@ -77,14 +94,87 @@ def _detectar_fila_encabezado(path, sheet_name, max_filas=6):
     return 1  # por defecto, la segunda fila
 
 
+def normalizar_codigo(v):
+    """Código de barras como texto: 7751234567890.0 → '7751234567890', NaN → ''."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return ''
+    if isinstance(v, (float, np.floating)) and float(v).is_integer():
+        return str(int(v))
+    s = str(v).strip()
+    if re.fullmatch(r'\d+\.0+', s):
+        s = s.split('.')[0]
+    return '' if s.lower() == 'nan' else s
+
+
 def _leer_hoja(path, sheet_name=None):
     xls = pd.ExcelFile(path)
     hoja = sheet_name or xls.sheet_names[0]
     fila = _detectar_fila_encabezado(path, hoja)
-    df = pd.read_excel(xls, sheet_name=hoja, header=fila)
+    # FIX: forzar códigos de barra como texto desde la lectura (antes llegaban como float si había vacíos)
+    encabezados = [str(c).strip() for c in
+                   pd.read_excel(xls, sheet_name=hoja, header=fila, nrows=0).columns]
+    convertidores = {c: str for c in encabezados if c in COLUMNAS_CODIGO_BARRA}
+    df = pd.read_excel(xls, sheet_name=hoja, header=fila, converters=convertidores)
     df = df.dropna(axis=1, how='all')
     df.columns = [str(c).strip() for c in df.columns]
+    for c in COLUMNAS_CODIGO_BARRA:
+        if c in df.columns:
+            df[c] = df[c].map(normalizar_codigo)
     return df
+
+
+def deduplicar_entre_archivos(dfs):
+    """Une exportaciones que pueden solaparse en fechas sin contar dos veces la misma transacción.
+
+    Dentro de un archivo, dos filas idénticas son transacciones reales (p. ej. dos líneas iguales en un
+    ticket). Entre archivos, la misma fila es la misma transacción exportada dos veces. Por eso cada fila
+    se numera por ocurrencia dentro de su archivo y se conserva el máximo de ocurrencias entre archivos.
+    """
+    # FIX: antes se concatenaba todo y las exportaciones solapadas duplicaban ventas/compras/movimientos
+    if not dfs:
+        return pd.DataFrame()
+    partes = []
+    for df in dfs:
+        df = df.copy()
+        clave = [c for c in df.columns if c not in _COLUMNAS_NUMERACION
+                 and not str(c).startswith(('Unnamed', '__'))]
+        df['__occ'] = df.groupby(clave, dropna=False).cumcount()
+        partes.append(df)
+    todo = pd.concat(partes, ignore_index=True)
+    clave = [c for c in todo.columns if c not in _COLUMNAS_NUMERACION
+             and not str(c).startswith(('Unnamed', '__'))] + ['__occ']
+    return todo.drop_duplicates(subset=clave, keep='first').drop(columns='__occ').reset_index(drop=True)
+
+
+def fecha_desde_nombre(path):
+    """Fecha de exportación escrita en el nombre del archivo (YYYY-MM-DD o YYYYMMDD), o None."""
+    nombre = os.path.basename(str(path))
+    for patron in (r'(20\d{2})-(\d{2})-(\d{2})', r'(20\d{2})(\d{2})(\d{2})'):
+        m = re.search(patron, nombre)
+        if m:
+            try:
+                return pd.Timestamp(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                continue
+    return None
+
+
+def _parse_fechas(serie, formatos, log, nombre_fuente):
+    """Prueba cada formato y completa lo que falte con el parser genérico (día primero)."""
+    # FIX: compras solo aceptaba '%d-%m-%Y'; si cambiaba el formato se perdían todas sin aviso
+    res = pd.Series(pd.NaT, index=serie.index, dtype='datetime64[ns]')
+    for fmt in formatos:
+        faltan = res.isna()
+        if not faltan.any():
+            break
+        res[faltan] = pd.to_datetime(serie[faltan], format=fmt, errors='coerce')
+    faltan = res.isna() & serie.notna()
+    if faltan.any():
+        res[faltan] = pd.to_datetime(serie[faltan], dayfirst=True, errors='coerce', format='mixed')
+    invalidas = int((res.isna() & serie.notna()).sum())
+    if invalidas:
+        log(f'  ⚠ {nombre_fuente}: {invalidas}/{len(serie)} filas con fecha no reconocida (se ignoran)')
+    return res
 
 
 def _parse_money(valor):
@@ -153,30 +243,34 @@ def cargar_datos(carpeta_entrada, log):
     for f in clasif['listado_productos']:
         df = _leer_hoja(f)
         df['__archivo_origen'] = os.path.basename(f)
+        # FIX: el orden entre listados usa la fecha del nombre del archivo; mtime solo como desempate
+        fecha_nom = fecha_desde_nombre(f)
+        df['__fecha_archivo'] = fecha_nom
         df['__mtime'] = os.path.getmtime(f)
         listados.append(df)
+    # FIX: ya no se hace drop_duplicates('CODIGO BARRAS') aquí: borraba las colisiones antes de que
+    # construir_dim_producto pudiera asignar sufijos. La deduplicación se hace allí, después.
     listado = pd.concat(listados, ignore_index=True)
-    listado = listado.sort_values('__mtime').drop_duplicates('CODIGO BARRAS', keep='last')
-    log(f'Listado de productos: {len(listado)} productos (archivo más reciente usado como stock actual)')
+    listado['__mtime'] = listado.groupby(listado['__fecha_archivo'].fillna(pd.Timestamp.min)).ngroup() * 1e10 \
+        + listado['__mtime']
+    listado = listado.sort_values('__mtime', kind='stable')
+    fechas_listado = [x for x in listado['__fecha_archivo'].dropna().unique()]
+    listado.attrs['fecha_listado'] = pd.Timestamp(max(fechas_listado)) if fechas_listado else None
+    log(f'Listado de productos: {len(listado)} filas en {len(listados)} archivo(s) '
+        f'(el más reciente se usa como stock actual)')
 
-    # --- ventas (todas las que haya, cualquier año) ---
-    ventas_list = []
-    for f in clasif['ventas']:
-        df = _leer_hoja(f, sheet_name=None)
-        ventas_list.append(df)
-    ventas = pd.concat(ventas_list, ignore_index=True)
-    log(f'Ventas: {len(ventas)} filas de {len(clasif["ventas"])} archivo(s)')
+    def _cargar(tipo, etiqueta):
+        dfs = [_leer_hoja(f) for f in clasif[tipo]]
+        crudo = sum(len(d) for d in dfs)
+        df = deduplicar_entre_archivos(dfs)
+        dup = crudo - len(df)
+        log(f'{etiqueta}: {len(df)} filas de {len(dfs)} archivo(s)'
+            + (f' ({dup} duplicadas entre exportaciones solapadas, descartadas)' if dup else ''))
+        return df
 
-    # --- compras ---
-    compras_list = [_leer_hoja(f) for f in clasif['compras']]
-    compras = pd.concat(compras_list, ignore_index=True)
-    log(f'Compras: {len(compras)} filas de {len(clasif["compras"])} archivo(s)')
-
-    # --- movimientos de almacén por producto (ingresos/salidas/traslados) ---
-    mov_list = [_leer_hoja(f) for f in clasif['movimientos_producto']]
-    movimientos = pd.concat(mov_list, ignore_index=True)
-    log(f'Movimientos de almacén: {len(movimientos)} filas de {len(clasif["movimientos_producto"])} archivo(s)')
-
+    ventas = _cargar('ventas', 'Ventas')
+    compras = _cargar('compras', 'Compras')
+    movimientos = _cargar('movimientos_producto', 'Movimientos de almacén')
     return listado, ventas, compras, movimientos
 
 
@@ -185,7 +279,9 @@ def cargar_datos(carpeta_entrada, log):
 # ---------------------------------------------------------------------------
 def construir_dim_producto(listado, log):
     df = listado.copy()
-    df['CODIGO BARRAS'] = df['CODIGO BARRAS'].astype(str).str.strip()
+    if '__mtime' in df.columns:
+        df = df.sort_values('__mtime', kind='stable')
+    df['CODIGO BARRAS'] = df['CODIGO BARRAS'].map(normalizar_codigo)
     df['PRODUCTO'] = df['PRODUCTO'].astype(str).str.strip()
 
     # Detectar colisiones: mismo código de barras, nombres de producto distintos
@@ -209,6 +305,12 @@ def construir_dim_producto(listado, log):
                 sku_final.append(f'{bc}-{len(vistos[bc])}')
     df['sku'] = sku_final
     log(f'Códigos de barra con colisión (mismo código, producto distinto): {colisiones}')
+    # FIX: deduplicar DESPUÉS de asignar sufijos; si el mismo producto aparece en varios listados
+    # se queda la fila del más reciente (df viene ordenado por antigüedad)
+    n_antes = len(df)
+    df = df.drop_duplicates('sku', keep='last')
+    if n_antes > len(df):
+        log(f'Listado: {n_antes - len(df)} filas repetidas del mismo producto (se usa la más reciente)')
 
     dim = pd.DataFrame({
         'sku': df['sku'],
@@ -223,10 +325,35 @@ def construir_dim_producto(listado, log):
     return dim, df[['CODIGO BARRAS', 'PRODUCTO', 'sku']].rename(columns={'CODIGO BARRAS': 'codigo_barras', 'PRODUCTO': 'nombre'})
 
 
-def _mapear_por_codigo_barra(df, col_codigo_barra, mapa_bc_a_sku, log, nombre_fuente):
+def construir_mapas(dim, mapa_nombre_df):
+    """Mapas para asignar SKU a ventas, compras y movimientos.
+
+    Returns:
+        mapa_bc_a_sku: código de barras → SKU base (el primero registrado con ese código).
+        mapa_bc_nombre_a_sku: (código, nombre normalizado) → SKU, para desambiguar colisiones.
+        mapa_nombre_a_sku: nombre normalizado → SKU.
+    """
+    mapa_bc_a_sku, mapa_bc_nombre_a_sku, mapa_nombre_a_sku = {}, {}, {}
+    for bc, nombre, sku in zip(mapa_nombre_df['codigo_barras'], mapa_nombre_df['nombre'], mapa_nombre_df['sku']):
+        key = _normalizar_nombre(nombre)
+        # FIX: antes dict(zip(...)) dejaba el ÚLTIMO sufijo y todas las ventas del código caían ahí
+        if bc not in mapa_bc_a_sku or sku == bc:
+            mapa_bc_a_sku[bc] = sku
+        mapa_bc_nombre_a_sku[(bc, key)] = sku
+        mapa_nombre_a_sku.setdefault(key, sku)
+    return mapa_bc_a_sku, mapa_bc_nombre_a_sku, mapa_nombre_a_sku
+
+
+def _mapear_por_codigo_barra(df, col_codigo_barra, mapa_bc_a_sku, log, nombre_fuente,
+                             col_nombre=None, mapa_bc_nombre=None):
     df = df.copy()
-    df[col_codigo_barra] = df[col_codigo_barra].astype(str).str.strip()
+    df[col_codigo_barra] = df[col_codigo_barra].map(normalizar_codigo)
     df['sku'] = df[col_codigo_barra].map(mapa_bc_a_sku)
+    if col_nombre and mapa_bc_nombre and col_nombre in df.columns:
+        # FIX: con colisión de código, el nombre del producto decide a qué sufijo va la fila
+        por_nombre = pd.Series(list(zip(df[col_codigo_barra], df[col_nombre].map(_normalizar_nombre))),
+                               index=df.index).map(mapa_bc_nombre)
+        df['sku'] = por_nombre.fillna(df['sku'])
     sin_match = df['sku'].isna().sum()
     if sin_match:
         log(f'  {nombre_fuente}: {sin_match}/{len(df)} filas sin SKU reconocido (código de barra no está en el listado de productos)')
@@ -246,14 +373,22 @@ def _mapear_por_nombre(df, col_nombre, mapa_nombre_a_sku, log, nombre_fuente):
 # ---------------------------------------------------------------------------
 # Etapa 3: reconstruir stock diario (ancla = listado más reciente)
 # ---------------------------------------------------------------------------
-def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_nombre_a_sku,
-                       fecha_ancla, log):
+def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_bc_nombre_a_sku,
+                      mapa_nombre_a_sku, fecha_ancla, log,
+                      ventas_son_salidas_de_almacen=False, compras_son_entradas_de_almacen=False):
+    """Reconstruye el stock diario hacia atrás desde el stock del listado (fecha_ancla).
+
+    ventas_son_salidas_de_almacen: True si el ERP registra cada venta también como "Salida" de almacén.
+        En ese caso las ventas NO se restan del stock (ya lo restan las salidas); siguen siendo la demanda.
+    compras_son_entradas_de_almacen: ídem para compras y "Entrada" de almacén.
+    fecha_ancla: fecha a la que corresponde el stock del listado. None = última transacción registrada.
+    """
     skus = dim['sku'].tolist()
 
     # ---- ventas: resta stock ----
-    ventas = _mapear_por_codigo_barra(ventas, 'CÓDIGO DE BARRA', mapa_bc_a_sku, log, 'Ventas')
-    ventas['fecha'] = pd.to_datetime(ventas['FECHA/HORA'], format='%d-%m-%Y %H:%M', errors='coerce')
-    ventas['fecha'] = ventas['fecha'].fillna(pd.to_datetime(ventas['FECHA/HORA'], dayfirst=True, errors='coerce'))
+    ventas = _mapear_por_codigo_barra(ventas, 'CÓDIGO DE BARRA', mapa_bc_a_sku, log, 'Ventas',
+                                      col_nombre='PRODUCTO', mapa_bc_nombre=mapa_bc_nombre_a_sku)
+    ventas['fecha'] = _parse_fechas(ventas['FECHA/HORA'], ['%d-%m-%Y %H:%M', '%d-%m-%Y %H:%M:%S'], log, 'Ventas')
     ventas['cantidad'] = pd.to_numeric(ventas['CANTIDAD'], errors='coerce').fillna(0)
     ventas['fecha'] = ventas['fecha'].dt.normalize()
     ventas_diarias = ventas.dropna(subset=['sku', 'fecha']).groupby(
@@ -262,18 +397,29 @@ def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_nom
     ventas_diarias['mov'] = -ventas_diarias['mov']
 
     # ---- compras: suma stock ----
-    compras = _mapear_por_codigo_barra(compras, 'COD. BARRA', mapa_bc_a_sku, log, 'Compras')
-    compras['fecha'] = pd.to_datetime(compras['FECHA'], format='%d-%m-%Y', errors='coerce')
+    compras = _mapear_por_codigo_barra(compras, 'COD. BARRA', mapa_bc_a_sku, log, 'Compras',
+                                       col_nombre='PRODUCTO', mapa_bc_nombre=mapa_bc_nombre_a_sku)
+    compras['fecha'] = _parse_fechas(compras['FECHA'], ['%d-%m-%Y', '%d-%m-%Y %H:%M'], log, 'Compras')
     compras['cantidad'] = pd.to_numeric(compras['CANTIDAD'], errors='coerce').fillna(0)
     compras['fecha'] = compras['fecha'].dt.normalize()
     compras_diarias = compras.dropna(subset=['sku', 'fecha']).groupby(
         ['sku', 'fecha'])['cantidad'].sum().reset_index()
     compras_diarias.columns = ['sku', 'fecha', 'mov']
 
-    # ---- movimientos de almacén (ingresos/salidas/traslados), por nombre de producto ----
-    movimientos = _mapear_por_nombre(movimientos, 'PRODUCTO', mapa_nombre_a_sku, log, 'Movimientos de almacén')
-    movimientos['fecha'] = pd.to_datetime(movimientos['FECHA'], format='%d-%m-%Y %I:%M %p', errors='coerce')
-    movimientos['fecha'] = movimientos['fecha'].fillna(pd.to_datetime(movimientos['FECHA'], errors='coerce'))
+    # ---- movimientos de almacén (ingresos/salidas/traslados) ----
+    # FIX: si el reporte trae código de barras se usa (más confiable); si no, el nombre del producto
+    col_bc_mov = next((c for c in COLUMNAS_CODIGO_BARRA if c in movimientos.columns), None)
+    if col_bc_mov:
+        movimientos = _mapear_por_codigo_barra(movimientos, col_bc_mov, mapa_bc_a_sku, log,
+                                               'Movimientos de almacén', col_nombre='PRODUCTO',
+                                               mapa_bc_nombre=mapa_bc_nombre_a_sku)
+        sin = movimientos['sku'].isna()
+        if sin.any() and 'PRODUCTO' in movimientos.columns:
+            movimientos.loc[sin, 'sku'] = movimientos.loc[sin, 'PRODUCTO'].map(_normalizar_nombre).map(mapa_nombre_a_sku)
+    else:
+        movimientos = _mapear_por_nombre(movimientos, 'PRODUCTO', mapa_nombre_a_sku, log, 'Movimientos de almacén')
+    movimientos['fecha'] = _parse_fechas(movimientos['FECHA'], ['%d-%m-%Y %I:%M %p', '%d-%m-%Y %H:%M'],
+                                         log, 'Movimientos de almacén')
     movimientos['cantidad'] = pd.to_numeric(movimientos['CANTIDAD'], errors='coerce').fillna(0)
 
     def signo_movimiento(row):
@@ -296,18 +442,48 @@ def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_nom
             return 0.0  # traslado fuera de San Jose, no afecta
         return 0.0
 
-    movimientos['mov'] = movimientos.apply(signo_movimiento, axis=1)
+    movimientos['mov'] = movimientos.apply(signo_movimiento, axis=1) if len(movimientos) else 0.0
     movimientos['fecha'] = movimientos['fecha'].dt.normalize()
     mov_diarios = movimientos.dropna(subset=['sku', 'fecha']).groupby(
         ['sku', 'fecha'])['mov'].sum().reset_index()
     mov_diarios.columns = ['sku', 'fecha', 'mov']
 
+    # FIX: detectar posible doble descuento (ventas que el ERP también registra como salidas/entradas)
+    tipos = movimientos.get('TIPO DE MOVIMIENTO', pd.Series(dtype=str)).astype(str).str.strip()
+    u_salidas = movimientos.loc[tipos.isin(['Salida', 'Salida de productos']), 'cantidad'].sum()
+    u_entradas = movimientos.loc[tipos == 'Entrada', 'cantidad'].sum()
+    u_ventas, u_compras = -ventas_diarias['mov'].sum(), compras_diarias['mov'].sum()
+    if not ventas_son_salidas_de_almacen and u_ventas > 0 and u_salidas >= UMBRAL_DOBLE_DESCUENTO * u_ventas:
+        log(f'⚠ Las salidas de almacén ({u_salidas:,.0f} u) equivalen al {u_salidas / u_ventas:.0%} de las ventas '
+            f'({u_ventas:,.0f} u): es probable que el ERP registre cada venta como salida y el stock se descuente '
+            f'dos veces. Revisa el parámetro ventas_son_salidas_de_almacen en preve_config.json.')
+    if not compras_son_entradas_de_almacen and u_compras > 0 and u_entradas >= UMBRAL_DOBLE_DESCUENTO * u_compras:
+        log(f'⚠ Las entradas de almacén ({u_entradas:,.0f} u) equivalen al {u_entradas / u_compras:.0%} de las '
+            f'compras ({u_compras:,.0f} u): es probable que cada compra genere una entrada. Revisa el parámetro '
+            f'compras_son_entradas_de_almacen en preve_config.json.')
+
     # ---- unir todos los movimientos netos diarios ----
-    todos = pd.concat([ventas_diarias, compras_diarias, mov_diarios], ignore_index=True)
+    # FIX: según la configuración de la empresa, no se cuenta dos veces lo que el ERP ya registra en almacén
+    partes = [mov_diarios]
+    if not ventas_son_salidas_de_almacen:
+        partes.append(ventas_diarias)
+    if not compras_son_entradas_de_almacen:
+        partes.append(compras_diarias)
+    todos = pd.concat(partes, ignore_index=True)
     neto = todos.groupby(['sku', 'fecha'])['mov'].sum().reset_index()
 
+    # FIX: la fecha ancla viene de los datos (nombre del listado o última transacción), no del mtime
+    ultima_tx = pd.concat([ventas_diarias['fecha'], compras_diarias['fecha'], mov_diarios['fecha']]).max()
+    if fecha_ancla is None or pd.isna(fecha_ancla):
+        fecha_ancla = ultima_tx
+        log(f'Fecha ancla del stock = última transacción registrada: {pd.Timestamp(fecha_ancla).date()}')
     fecha_ancla = pd.Timestamp(fecha_ancla).normalize()
-    fecha_inicio = neto['fecha'].min()
+    posteriores = int((neto['fecha'] > fecha_ancla).sum())
+    if posteriores:
+        log(f'⚠ {posteriores} movimientos diarios son posteriores a la fecha del listado ({fecha_ancla.date()}) '
+            f'y no se usan para el stock: exporta un listado más reciente.')
+    # el rango cubre también el período de ventas aunque no se resten del stock
+    fecha_inicio = min(neto['fecha'].min(), ventas_diarias['fecha'].min())
     fechas = pd.date_range(fecha_inicio, fecha_ancla, freq='D')
     tabla = neto.pivot(index='fecha', columns='sku', values='mov').reindex(fechas, fill_value=0)
     tabla = tabla.reindex(columns=skus, fill_value=0)
@@ -422,6 +598,31 @@ def construir_panel_y_segmentacion(stock, ventas_diarias, dim, log):
 # ---------------------------------------------------------------------------
 # Etapa 5: entrenar los 3 modelos y pronosticar demanda a 141 días
 # ---------------------------------------------------------------------------
+VENTANAS_LGB = (4, 8, 13, 26, 52)
+
+
+def construir_target_horizonte(serie, h):
+    """Suma de las próximas h semanas (t+1 … t+h), sin incluir la semana t.
+
+    rolling(h).sum() en t+h suma x[t+1 … t+h]; al desplazarlo -h queda en la fila t. Es equivalente a
+    shift(-h).rolling(h) pero no pierde las primeras h-1 semanas. Las últimas h semanas no tienen un
+    futuro completo y quedan en NaN (no se entrena con targets parciales).
+    """
+    # FIX: antes era shift(-1).rolling(21, min_periods=10): sumaba t-19 … t+1 (casi todo pasado,
+    # solapado con las features) y aceptaba targets parciales
+    return serie.rolling(h, min_periods=h).sum().shift(-h)
+
+
+def construir_features_lgb(sub):
+    """Ventas acumuladas de las últimas w semanas, INCLUYENDO la semana t (la última conocida)."""
+    # FIX: antes se usaba shift(1): la semana más reciente nunca entraba en la predicción
+    sub = sub.sort_values(['sku', 'semana_inicio']).copy()
+    for w in VENTANAS_LGB:
+        sub[f'ventas_{w}s'] = sub.groupby('sku')['unidades_venta_neta'].transform(
+            lambda x: x.rolling(w, min_periods=1).sum())
+    return sub, [f'ventas_{w}s' for w in VENTANAS_LGB]
+
+
 def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log):
     import lightgbm as lgb
     from catboost import CatBoostRegressor
@@ -441,10 +642,12 @@ def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log):
             try:
                 m = TSB(alpha_d=0.1, alpha_p=0.1)
                 m.fit(serie)
-                fc = m.predict(h=21)
+                fc = m.predict(h=HORIZONTE_SEMANAS_TARGET)
                 pred = float(np.mean(fc['mean']))
                 std = float(np.std(serie))
-            except Exception:
+            except (ValueError, ZeroDivisionError, FloatingPointError, KeyError) as e:
+                # FIX: antes except Exception silencioso; ahora se registra qué SKU cae al promedio simple
+                logger.warning('Croston-TSB falló para %s (%s); se usa el promedio simple', sku, e)
                 pred, std = float(np.mean(serie)), float(np.std(serie))
         p50 = pred * HORIZONTE_SEMANAS
         p10 = max(0.0, pred - 1.2816 * std) * HORIZONTE_SEMANAS
@@ -455,13 +658,10 @@ def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log):
     skus_lgb = segmentacion[segmentacion.modelo_asignado == 'LightGBM']['sku'].tolist()
     log(f'Entrenando LightGBM para {len(skus_lgb)} SKU...')
     if skus_lgb:
-        sub = panel_full[panel_full.sku.isin(skus_lgb)].sort_values(['sku', 'semana_inicio']).copy()
-        for w in [4, 8, 13, 26, 52]:
-            sub[f'ventas_{w}s'] = sub.groupby('sku')['unidades_venta_neta'].transform(
-                lambda x: x.shift(1).rolling(w, min_periods=1).sum())
-        feat_cols = [f'ventas_{w}s' for w in [4, 8, 13, 26, 52]]
+        sub, feat_cols = construir_features_lgb(panel_full[panel_full.sku.isin(skus_lgb)])
+        h = HORIZONTE_SEMANAS_TARGET
         sub['y_20s'] = sub.groupby('sku')['unidades_venta_neta'].transform(
-            lambda x: x.shift(-1).rolling(21, min_periods=10).sum())
+            lambda x: construir_target_horizonte(x, h))
         train = sub.dropna(subset=feat_cols + ['y_20s'])
         if len(train) > 50:
             model = lgb.LGBMRegressor(n_estimators=200, learning_rate=0.05, max_depth=6,
@@ -470,7 +670,11 @@ def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log):
             resid_std = float(np.std(model.predict(train[feat_cols]) - train['y_20s']))
             latest = sub.sort_values('semana_inicio').groupby('sku').tail(1)
             latest = latest.dropna(subset=feat_cols)
-            preds = np.clip(model.predict(latest[feat_cols]), 0, None)
+            # FIX: el target cubre h semanas enteras; se reescala al horizonte real (20.14 sem)
+            # para que LightGBM, Croston y CatBoost expresen la demanda en el mismo horizonte
+            escala = HORIZONTE_SEMANAS / h
+            resid_std *= escala
+            preds = np.clip(model.predict(latest[feat_cols]), 0, None) * escala
             for sku, p50 in zip(latest['sku'], preds):
                 resultados.append({'sku': sku, 'demanda_p10_141d': max(0, p50 - 1.2816 * resid_std),
                                     'demanda_p50_141d': p50, 'demanda_p90_141d': p50 + 1.2816 * resid_std})
@@ -617,16 +821,48 @@ def _clasificar_accion(row):
 
     # --- 6. Necesita reposición → RECOMPRAR ---
     if compra_sug > 0:
-        return 'RECOMPRAR', (f'Stock ({stock:.0f}) bajo el punto de reorden ({rop:.0f}) '
-                             f'— comprar {compra_sug:.0f} unidades.')
+        # FIX: el disparador es el nivel objetivo (no el ROP); el ROP indica si ya es urgente
+        transito = row.get('stock_en_transito', 0) or 0
+        nivel = row.get('nivel_objetivo', rop)
+        txt_tr = f' + {transito:.0f} en tránsito' if transito else ''
+        urgente = ' Ya está bajo el punto de reorden: es urgente.' if stock + transito <= rop else ''
+        return 'RECOMPRAR', (f'Stock ({stock:.0f}{txt_tr}) bajo el nivel objetivo ({nivel:.0f}) '
+                             f'— comprar {compra_sug:.0f} unidades.{urgente}')
 
     # --- 7. Default: stock OK, no hacer nada especial → REDUCIR ---
     return 'REDUCIR', f'Stock ({stock:.0f}) suficiente para el horizonte — no comprar por ahora.'
 
 
+def cargar_ordenes_abiertas(carpeta):
+    """Stock en tránsito por SKU desde ordenes_compra_abiertas.csv (solo estado 'abierta').
+
+    Si el archivo no existe se crea vacío con sus columnas, para que el usuario lo complete.
+    """
+    ruta = os.path.join(carpeta, NOMBRE_ORDENES_ABIERTAS)
+    if not os.path.exists(ruta):
+        pd.DataFrame(columns=COLUMNAS_ORDENES).to_csv(ruta, index=False, encoding='utf-8-sig')
+        logger.info('Creada plantilla vacía de órdenes abiertas: %s', ruta)
+        return pd.Series(dtype=float)
+    df = pd.read_csv(ruta, dtype={'sku': str}, encoding='utf-8-sig')
+    if df.empty or not {'sku', 'cantidad'} <= set(df.columns):
+        return pd.Series(dtype=float)
+    if 'estado' in df.columns:
+        df = df[df['estado'].fillna('abierta').astype(str).str.strip().str.lower() == 'abierta']
+    df['cantidad'] = pd.to_numeric(df['cantidad'], errors='coerce').fillna(0)
+    return df.groupby('sku')['cantidad'].sum()
+
+
 def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fecha_fin, log,
                            compras_raw=None, mapa_bc_a_sku=None,
-                           horizonte_semanas_override=None):
+                           horizonte_semanas_override=None, stock_en_transito=None,
+                           lead_time_dias=LEAD_TIME_DIAS_INT):
+    """Calcula ROP, nivel objetivo y cantidad a pedir por SKU.
+
+    ROP (punto de reorden) = demanda durante el lead time + stock de seguridad.
+    Nivel objetivo         = demanda del horizonte (revisión + lead time) + stock de seguridad.
+    Cantidad a pedir       = max(0, nivel objetivo − stock actual − stock en tránsito).
+    stock_en_transito: Series sku → unidades pedidas y aún no recibidas (ver cargar_ordenes_abiertas).
+    """
     fecha_stock_actual = stock.index.max()
     stock_actual = stock.loc[fecha_stock_actual].rename('stock_actual').reset_index()
     stock_actual.columns = ['sku', 'stock_actual']
@@ -677,10 +913,18 @@ def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fec
     df['z'] = df['clase_abc'].map(Z_NIVEL_SERVICIO).fillna(Z_NIVEL_SERVICIO['C'])
     df['sigma_demanda_141d'] = ((df['demanda_p90_141d'] - df['demanda_p50_141d']) / 1.2816).clip(lower=0)
     df['stock_seguridad'] = (df['z'] * df['sigma_demanda_141d']).clip(lower=0)
-    df['stock_en_transito'] = 0.0
-    df['rop'] = df['demanda_p50_141d'] + df['stock_seguridad']
+    # FIX: stock en tránsito real (órdenes abiertas) en vez de 0.0 fijo
+    transito = stock_en_transito if stock_en_transito is not None else pd.Series(dtype=float)
+    df['stock_en_transito'] = df['sku'].map(transito).fillna(0.0).astype(float)
+    # FIX: ROP y nivel objetivo son conceptos distintos (antes "rop" era el nivel objetivo)
+    horizonte_dias = _hz * 7.0
+    df['demanda_lead_time'] = df['demanda_p50_141d'] * lead_time_dias / horizonte_dias
+    df['rop'] = df['demanda_lead_time'] + df['stock_seguridad']
+    df['nivel_objetivo'] = df['demanda_p50_141d'] + df['stock_seguridad']
     df['stock_actual'] = df['stock_actual'].fillna(0)
-    df['compra_sugerida_unid'] = (df['rop'] - df['stock_actual'] - df['stock_en_transito']).clip(lower=0).round(0)
+    df['cantidad_a_pedir'] = (df['nivel_objetivo'] - df['stock_actual']
+                              - df['stock_en_transito']).clip(lower=0).round(0)
+    df['compra_sugerida_unid'] = df['cantidad_a_pedir']      # alias: lo usan la UI, el historial y el informe
     df['costo_total_compra_pen'] = df['compra_sugerida_unid'] * df['costo_puesto_almacen_pen']
     df['dato_incompleto'] = df['costo_puesto_almacen_pen'].isna() | df['precio_regular_pen'].isna()
 

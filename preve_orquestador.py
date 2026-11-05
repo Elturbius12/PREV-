@@ -2,14 +2,15 @@
 """Orquesta el pipeline completo y genera el Excel + dashboard finales."""
 import os
 import json
+import sqlite3
 import datetime
 import pandas as pd
 
 from preve_pipeline import (
-    cargar_datos, construir_dim_producto, reconstruir_stock,
+    cargar_datos, construir_dim_producto, construir_mapas, reconstruir_stock,
     construir_panel_y_segmentacion, entrenar_y_pronosticar, calcular_recomendacion,
-    extraer_proveedor_principal, _normalizar_nombre,
-    HORIZONTE_SEMANAS_INT, HORIZONTE_SEMANAS_LOCAL,
+    cargar_ordenes_abiertas,
+    HORIZONTE_DIAS, HORIZONTE_SEMANAS_LOCAL, LEAD_TIME_DIAS_INT, LEAD_TIME_DIAS_LOCAL,
 )
 from preve_ciclo import (
     registrar_importacion, resumen_ciclo_texto,
@@ -18,6 +19,14 @@ from preve_ciclo import (
 from preve_validacion import generar_scorecard
 from preve_historial import registrar_ejecucion
 from preve_simulacion import simular, generar_excel_simulacion
+from preve_utils import get_logger
+
+logger = get_logger('orquestador')
+
+NOMBRE_REC_ANTERIOR = 'recomendacion_anterior.csv'
+NOMBRE_REC_ANTERIOR_META = 'recomendacion_anterior_meta.json'
+NOMBRE_SCORECARD_JSON = 'scorecard_ultimo.json'
+_COLS_DEMANDA = ('demanda_p50_141d', 'demanda_p10_141d', 'demanda_p90_141d')
 
 # Sucursales conocidas de Yuju Store
 SUCURSALES = {
@@ -31,11 +40,14 @@ SUCURSALES = {
 def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
                       sucursal='San José'):
     """Pipeline principal: genera reporte internacional + reporte local + ciclo."""
+    from preve_datos import cargar_config
     os.makedirs(carpeta_salida, exist_ok=True)
+    cfg = cargar_config()
 
-    # ── Registrar importación en el ciclo ──
-    progreso('Registrando importación en el ciclo de compras...')
-    info_ciclo = registrar_importacion(carpeta_salida)
+    # ── Ciclo: vista previa (se confirma recién al terminar con éxito) ──
+    # FIX: antes la importación se registraba al inicio aunque el pipeline fallara después
+    progreso('Calculando la posición en el ciclo de compras...')
+    info_ciclo = registrar_importacion(carpeta_salida, guardar=False)
     etiqueta = info_ciclo['etiqueta']
     progreso(resumen_ciclo_texto(info_ciclo))
 
@@ -44,29 +56,24 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
 
     progreso('Paso 2/7 — Identificando productos y códigos de barra...')
     dim, mapa_nombre_df = construir_dim_producto(listado, progreso)
-    mapa_bc_a_sku = dict(zip(dim['codigo_barras'], dim['sku']))
-    mapa_nombre_a_sku = {}
-    for _, r in mapa_nombre_df.iterrows():
-        key = _normalizar_nombre(r['nombre'])
-        mapa_nombre_a_sku.setdefault(key, r['sku'])
+    mapa_bc_a_sku, mapa_bc_nombre_a_sku, mapa_nombre_a_sku = construir_mapas(dim, mapa_nombre_df)
 
-    # La fecha ancla es la fecha de modificación del listado de productos más reciente,
-    # NO la fecha de hoy (el stock del listado refleja ese momento, no hoy).
-    import glob as _glob
-    _listados = _glob.glob(os.path.join(carpeta_entrada, '**', '*listado*productos*'), recursive=True)
-    _listados += _glob.glob(os.path.join(carpeta_entrada, '**', '*Listado*Productos*'), recursive=True)
-    _listados = [f for f in _listados if f.endswith(('.xlsx', '.xls')) and not os.path.basename(f).startswith('~$')]
-    if _listados:
-        _mas_reciente = max(_listados, key=os.path.getmtime)
-        fecha_ancla = pd.Timestamp(datetime.datetime.fromtimestamp(os.path.getmtime(_mas_reciente)))
-        progreso(f'Fecha ancla (mtime del listado más reciente): {fecha_ancla.strftime("%Y-%m-%d %H:%M")}')
-    else:
-        fecha_ancla = pd.Timestamp(datetime.date.today())
-        progreso(f'⚠ No se encontró archivo de listado para determinar fecha ancla, usando hoy: {fecha_ancla.strftime("%Y-%m-%d")}')
+    # FIX: la fecha ancla sale de los datos (fecha del nombre del listado; si no hay, la última
+    # transacción), ya no del mtime del archivo, que cambia al copiarlo o descomprimirlo
+    fecha_ancla = listado.attrs.get('fecha_listado')
+    if fecha_ancla is not None:
+        progreso(f'Fecha ancla del stock (fecha del listado): {fecha_ancla.strftime("%Y-%m-%d")}')
 
     progreso('Paso 3/7 — Reconstruyendo el stock diario histórico...')
     stock, ventas_diarias, _ = reconstruir_stock(
-        ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_nombre_a_sku, fecha_ancla, progreso)
+        ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_bc_nombre_a_sku, mapa_nombre_a_sku,
+        fecha_ancla, progreso,
+        ventas_son_salidas_de_almacen=bool(cfg.get('ventas_son_salidas_de_almacen', False)),
+        compras_son_entradas_de_almacen=bool(cfg.get('compras_son_entradas_de_almacen', False)))
+    fecha_datos = stock.index.max()
+    transito = cargar_ordenes_abiertas(carpeta_salida)
+    if len(transito):
+        progreso(f'Stock en tránsito: {len(transito)} SKU con órdenes abiertas ({transito.sum():,.0f} u)')
 
     progreso('Paso 4/7 — Construyendo el panel semanal y segmentando productos...')
     panel_full, segmentacion, fecha_fin = construir_panel_y_segmentacion(stock, ventas_diarias, dim, progreso)
@@ -74,7 +81,9 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
     # Excel rápido de clasificación: ya se puede revisar mientras los modelos siguen entrenando
     try:
         _generar_clasificacion(segmentacion, dim, stock, carpeta_salida, progreso)
-    except Exception as e:
+    except (OSError, ValueError, KeyError) as e:
+        # FIX: excepciones específicas + traceback en el log (es una salida opcional, no detiene el análisis)
+        logger.exception('No se pudo generar el Excel de clasificación')
         progreso(f'⚠ No se pudo generar el Excel de clasificación: {e}')
 
     progreso('Paso 5/7 — Entrenando los 3 modelos de pronóstico (puede tardar unos minutos)...')
@@ -85,7 +94,8 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
     # ══════════════════════════════════════════════════════════════════
     progreso(f'Paso 6/7 — Reporte INTERNACIONAL ({etiqueta}): calculando compras a 141 días...')
     rec_int = calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fecha_fin, progreso,
-                                     compras_raw=compras, mapa_bc_a_sku=mapa_bc_a_sku)
+                                     compras_raw=compras, mapa_bc_a_sku=mapa_bc_a_sku,
+                                     stock_en_transito=transito, lead_time_dias=LEAD_TIME_DIAS_INT)
 
     progreso(f'Generando archivos del reporte internacional ({etiqueta})...')
     _generar_excel(rec_int, sin_pronostico, carpeta_salida, progreso,
@@ -103,7 +113,8 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
     progreso('Paso 7/7 — Reporte LOCAL: calculando compras a 40 días para proveedores nacionales...')
     rec_local = calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fecha_fin, progreso,
                                        compras_raw=compras, mapa_bc_a_sku=mapa_bc_a_sku,
-                                       horizonte_semanas_override=HORIZONTE_SEMANAS_LOCAL)
+                                       horizonte_semanas_override=HORIZONTE_SEMANAS_LOCAL,
+                                       stock_en_transito=transito, lead_time_dias=LEAD_TIME_DIAS_LOCAL)
 
     # Solo generar nota de compra local para productos que necesitan compra
     _generar_notas_compra_proveedor(rec_local, carpeta_salida, progreso,
@@ -115,28 +126,22 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
     # ══════════════════════════════════════════════════════════════════
     # VALIDACIÓN AUTOMÁTICA (si existe recomendación anterior)
     # ══════════════════════════════════════════════════════════════════
-    _intentar_validacion(rec_int, ventas_diarias, carpeta_salida, progreso)
+    scorecard_result = _intentar_validacion(rec_int, ventas_diarias, carpeta_salida, progreso,
+                                            fecha_datos=fecha_datos)
+
+    # FIX: la importación se confirma en el ciclo solo cuando el análisis terminó bien
+    info_ciclo = registrar_importacion(carpeta_salida)
 
     # ══════════════════════════════════════════════════════════════════
     # HISTORIAL SQLite
     # ══════════════════════════════════════════════════════════════════
     progreso('Registrando ejecución en el historial SQLite...')
+    # FIX: el scorecard se pasa directo desde esta corrida; antes se releía un JSON que podía ser viejo
     try:
-        scorecard_result = None
-        scorecard_path = os.path.join(carpeta_salida, 'PREVE_Scorecard.xlsx')
-        if os.path.exists(scorecard_path):
-            # Intentar leer el scorecard que _intentar_validacion pudo haber generado
-            try:
-                import json as _json
-                _sc_json = os.path.join(carpeta_salida, 'scorecard_ultimo.json')
-                if os.path.exists(_sc_json):
-                    with open(_sc_json, 'r') as f:
-                        scorecard_result = _json.load(f)
-            except Exception:
-                pass
         registrar_ejecucion(carpeta_salida, rec_int, info_ciclo=info_ciclo,
                             sucursal=sucursal, scorecard=scorecard_result, log=progreso)
-    except Exception as e:
+    except (OSError, ValueError, KeyError, sqlite3.Error) as e:
+        logger.exception('No se pudo registrar la ejecución en el historial')
         progreso(f'⚠ No se pudo registrar en historial: {e}')
 
     # ══════════════════════════════════════════════════════════════════
@@ -146,7 +151,9 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
     try:
         from preve_informe import generar_informe
         generar_informe(carpeta_salida, sucursal, log=progreso)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — el informe es opcional: cualquier fallo no debe perder el análisis
+        # FIX: el error ahora queda en el log con traceback completo
+        logger.exception('No se pudo generar el informe para gerencia')
         progreso(f'⚠ No se pudo generar el informe para gerencia: {e}')
 
     progreso('═' * 60)
@@ -294,7 +301,9 @@ def ejecutar_pipeline_multi_sucursal(carpeta_entrada, carpeta_salida, progreso=p
         try:
             rec = ejecutar_pipeline(suc_carpeta, suc_salida, progreso, sucursal=suc_nombre)
             resultados[suc_nombre] = rec
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — una sucursal fallida no debe detener a las demás
+            # FIX: el error ahora queda en el log con traceback completo
+            logger.exception('Falló el pipeline de la sucursal %s', suc_nombre)
             progreso(f'⚠ Error en sucursal {suc_nombre}: {e}')
             resultados[suc_nombre] = None
 
@@ -330,8 +339,9 @@ def _generar_traslados(resultados, carpeta_salida, log):
                 row_a = df_a[df_a['sku'] == sku].iloc[0]
                 row_b = df_b[df_b['sku'] == sku].iloc[0]
 
-                exceso_a = row_a['stock_actual'] - row_a.get('rop', row_a.get('demanda_p50_141d', 0))
-                falta_b = row_b.get('rop', row_b.get('demanda_p50_141d', 0)) - row_b['stock_actual']
+                # FIX: exceso/falta frente al nivel objetivo (antes "rop" era el nivel objetivo)
+                exceso_a = row_a['stock_actual'] - row_a.get('nivel_objetivo', row_a.get('rop', 0))
+                falta_b = row_b.get('nivel_objetivo', row_b.get('rop', 0)) - row_b['stock_actual']
 
                 if exceso_a > 5 and falta_b > 5:
                     trasladar = min(exceso_a, falta_b)
@@ -345,8 +355,8 @@ def _generar_traslados(resultados, carpeta_salida, log):
                         'falta_destino': int(falta_b),
                     })
 
-                exceso_b = row_b['stock_actual'] - row_b.get('rop', row_b.get('demanda_p50_141d', 0))
-                falta_a = row_a.get('rop', row_a.get('demanda_p50_141d', 0)) - row_a['stock_actual']
+                exceso_b = row_b['stock_actual'] - row_b.get('nivel_objetivo', row_b.get('rop', 0))
+                falta_a = row_a.get('nivel_objetivo', row_a.get('rop', 0)) - row_a['stock_actual']
 
                 if exceso_b > 5 and falta_a > 5:
                     trasladar = min(exceso_b, falta_a)
@@ -391,51 +401,73 @@ def ejecutar_simulacion(carpeta_salida, escenario, progreso=print):
     return resultado
 
 
-def _intentar_validacion(rec_actual, ventas_diarias, carpeta_salida, log):
-    """Si existe una recomendación anterior guardada, genera el scorecard."""
-    csv_anterior = os.path.join(carpeta_salida, 'recomendacion_anterior.csv')
-    if not os.path.exists(csv_anterior):
-        # Guardar la actual como "anterior" para la próxima vez
-        rec_actual.to_csv(csv_anterior, index=False)
-        log('Primera ejecución — no hay recomendación anterior para validar.')
-        log('La recomendación actual se guardó para comparar en la próxima importación.')
-        return
+def _intentar_validacion(rec_actual, ventas_diarias, carpeta_salida, log, fecha_datos=None):
+    """Valida la recomendación anterior contra las ventas reales ocurridas desde entonces.
 
-    log('Se encontró recomendación anterior — generando scorecard de validación...')
-    try:
-        recom_ant = pd.read_csv(csv_anterior)
+    ventas_diarias: DataFrame sku / fecha / mov (mov negativo = unidades vendidas), de reconstruir_stock.
+    fecha_datos: fecha hasta la que llegan los datos de esta corrida (por defecto, la última venta).
+    Returns: dict del scorecard, o None si no hubo validación.
+    """
+    csv_anterior = os.path.join(carpeta_salida, NOMBRE_REC_ANTERIOR)
+    meta_anterior = os.path.join(carpeta_salida, NOMBRE_REC_ANTERIOR_META)
+    sc_json = os.path.join(carpeta_salida, NOMBRE_SCORECARD_JSON)
+    # FIX: un scorecard de una corrida anterior nunca debe pasar como el de esta corrida
+    if os.path.exists(sc_json):
+        os.remove(sc_json)
+    if fecha_datos is None:
+        fecha_datos = ventas_diarias['fecha'].max()
+    fecha_datos = pd.Timestamp(fecha_datos).normalize()
 
-        # Calcular ventas reales acumuladas desde la última recomendación
-        # Usamos ventas_diarias que es un DataFrame con columnas sku + fecha + unidades
-        if isinstance(ventas_diarias, pd.DataFrame) and 'sku' in ventas_diarias.columns:
-            venta_real = ventas_diarias.groupby('sku')['unidades'].sum().reset_index()
-            venta_real.columns = ['sku', 'venta_real']
-        elif isinstance(ventas_diarias, pd.DataFrame):
-            # ventas_diarias puede ser pivot (sku como columnas, fechas como índice)
-            venta_real = ventas_diarias.sum().reset_index()
-            venta_real.columns = ['sku', 'venta_real']
-        else:
-            log('⚠ Formato de ventas_diarias no reconocido — omitiendo validación.')
-            rec_actual.to_csv(csv_anterior, index=False)
-            return
-
-        resultado = generar_scorecard(carpeta_salida, recom_ant, venta_real, log)
-        log(f'Scorecard: {resultado["agregadas"]["calificacion"]} '
-            f'(WMAPE {resultado["agregadas"]["wmape"]}%)')
-        # Guardar JSON para que el historial lo recoja
+    fecha_ant = None
+    if os.path.exists(meta_anterior):
         try:
-            import json as _json
-            with open(os.path.join(carpeta_salida, 'scorecard_ultimo.json'), 'w') as f:
-                _json.dump(resultado, f, default=str, ensure_ascii=False)
-        except Exception:
-            pass
+            with open(meta_anterior, 'r', encoding='utf-8') as f:
+                fecha_ant = pd.Timestamp(json.load(f)['fecha_datos']).normalize()
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            logger.warning('No se pudo leer %s; se omite la validación', meta_anterior, exc_info=True)
 
-    except Exception as e:
-        log(f'⚠ No se pudo generar el scorecard: {e}')
+    resultado = None
+    if not os.path.exists(csv_anterior):
+        log('Primera ejecución — no hay recomendación anterior para validar.')
+    elif fecha_ant is None:
+        log('⚠ La recomendación anterior no tiene fecha de datos (versión antigua de PREVÉ): '
+            'no se puede saber qué ventas validar. Se valida desde la próxima importación.')
+    elif fecha_datos <= fecha_ant:
+        log(f'Los datos ({fecha_datos.date()}) no son más nuevos que la recomendación anterior '
+            f'({fecha_ant.date()}): no hay período nuevo que validar.')
+    else:
+        dias = (fecha_datos - fecha_ant).days
+        log(f'Validando la recomendación del {fecha_ant.date()} contra {dias} días de ventas reales...')
+        try:
+            recom_ant = pd.read_csv(csv_anterior, dtype={'sku': str})
+            # FIX: solo las ventas ocurridas DESPUÉS de la recomendación anterior (antes: todo el historial),
+            # con la columna real 'mov' (antes 'unidades', que no existe → KeyError oculto)
+            vd = ventas_diarias[(ventas_diarias['fecha'] > fecha_ant) & (ventas_diarias['fecha'] <= fecha_datos)]
+            venta_real = (-vd.groupby('sku')['mov'].sum()).rename('venta_real').reset_index()
+            # FIX: el pronóstico es para 141 días; se prorratea a los días realmente transcurridos
+            factor = min(1.0, dias / HORIZONTE_DIAS)
+            for col in _COLS_DEMANDA:
+                if col in recom_ant.columns:
+                    recom_ant[col] = recom_ant[col] * factor
+            resultado = generar_scorecard(carpeta_salida, recom_ant, venta_real, log)
+            resultado['periodo'] = {'desde': str(fecha_ant.date()), 'hasta': str(fecha_datos.date()),
+                                    'dias': dias, 'factor_prorrateo': round(factor, 4)}
+            log(f'Scorecard: {resultado["agregadas"]["calificacion"]} '
+                f'(WMAPE {resultado["agregadas"]["wmape"]}%)')
+            with open(sc_json, 'w', encoding='utf-8') as f:
+                json.dump(resultado, f, default=str, ensure_ascii=False)
+        except (KeyError, ValueError, OSError, pd.errors.ParserError) as e:
+            # FIX: antes un except Exception genérico ocultaba el KeyError
+            logger.exception('Falló la validación de la recomendación anterior')
+            log(f'⚠ No se pudo generar el scorecard: {type(e).__name__}: {e}')
+            resultado = None
 
-    # Actualizar la recomendación anterior con la actual
+    # La recomendación actual pasa a ser la referencia, con la fecha de sus datos
     rec_actual.to_csv(csv_anterior, index=False)
+    with open(meta_anterior, 'w', encoding='utf-8') as f:
+        json.dump({'fecha_datos': str(fecha_datos.date())}, f)
     log('Recomendación actual guardada como referencia para la próxima validación.')
+    return resultado
 
 
 def _generar_excel(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_ciclo=None):
@@ -453,7 +485,10 @@ def _generar_excel(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_cic
         'accion': 'ACCIÓN', 'motivo_accion': 'Motivo de la acción',
         'stock_actual': 'Stock actual (reconstruido)', 'demanda_p50_141d': 'Demanda esperada (141 dias)',
         'demanda_p10_141d': 'Demanda minima esperada (P10)', 'demanda_p90_141d': 'Demanda maxima esperada (P90)',
+        'stock_en_transito': 'Stock en tránsito (órdenes abiertas)',
+        'demanda_lead_time': 'Demanda durante el lead time',
         'stock_seguridad': 'Stock de seguridad', 'rop': 'Punto de reorden (ROP)',
+        'nivel_objetivo': 'Nivel objetivo',
         'compra_sugerida_unid': 'CANTIDAD A COMPRAR',
         'costo_puesto_almacen_pen': 'Costo unitario (S/)', 'costo_total_compra_pen': 'Inversion total (S/)',
         'margen_pct': 'Margen (%)', 'tendencia_venta': 'Tendencia (u/sem)',
@@ -461,7 +496,8 @@ def _generar_excel(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_cic
     }
     available_cols = [c for c in cols.keys() if c in df.columns]
     df2 = df[available_cols].rename(columns=cols)
-    for c in ['Demanda esperada (141 dias)', 'Stock de seguridad', 'Punto de reorden (ROP)', 'Inversion total (S/)']:
+    for c in ['Demanda esperada (141 dias)', 'Stock de seguridad', 'Punto de reorden (ROP)', 'Nivel objetivo',
+              'Demanda durante el lead time', 'Inversion total (S/)']:
         if c in df2.columns:
             df2[c] = df2[c].round(1)
     if 'Margen (%)' in df2.columns:
@@ -666,9 +702,13 @@ def _generar_dashboard(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info
     def _explicacion(row):
         vs = (row['demanda_p50_141d'] / HORIZONTE_SEMANAS) if row['demanda_p50_141d'] else 0
         if row['decision'] == 'COMPRAR':
+            # FIX: la explicación usa el nivel objetivo (cobertura del horizonte), no el ROP
+            transito = row.get('stock_en_transito', 0) or 0
             txt = (f"Se espera vender ~{vs:.0f} unidades/semana en las próximas ~20 semanas. "
-                   f"Tienes {row['stock_actual']:.0f} en stock y necesitas al menos {row['rop']:.0f} "
-                   f"para no quedarte sin producto mientras llega el siguiente pedido. "
+                   f"Tienes {row['stock_actual']:.0f} en stock"
+                   + (f" y {transito:.0f} en camino" if transito else "")
+                   + f"; para cubrir el horizonte con margen de seguridad necesitas "
+                   f"{row.get('nivel_objetivo', row['rop']):.0f}. "
                    f"Por eso se sugiere comprar {row['compra_sugerida_unid']:.0f}.")
         else:
             txt = (f"Tu stock actual ({row['stock_actual']:.0f}) ya cubre lo que se espera vender "

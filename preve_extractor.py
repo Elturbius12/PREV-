@@ -33,11 +33,22 @@ import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from preve_utils import get_logger
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:  # python-dotenv es opcional; sin él se leen variables del sistema
     pass
+
+logger = get_logger('extractor')
+
+
+def carpeta_descarga(base):
+    """Crea y devuelve <base>/YYYY-MM-DD_HH-MM-SS para una extracción."""
+    ruta = os.path.join(base, datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
+    os.makedirs(ruta, exist_ok=True)
+    return ruta
 
 # ---------------------------------------------------------------------------
 # Configuración de tiendas
@@ -173,26 +184,51 @@ async def _seleccionar_tienda(page, tienda_key, log):
     return tienda['base_url']
 
 
+# Textos EXACTOS (sin mayúsculas/espacios) de los únicos botones que el bot puede pulsar en el modal
+# "Debe cerrar la caja". Nunca se compara por substring: "Cerrar caja" contiene "cerrar".
+BOTONES_MODAL_CAJA_PERMITIDOS = frozenset({
+    'mantener caja abierta', 'continuar sin cerrar', 'quedarse aquí', 'quedarse aqui',
+})
+
+
+def boton_modal_permitido(texto):
+    """True solo si el texto del botón coincide exactamente con la lista blanca."""
+    return ' '.join(str(texto or '').split()).casefold() in BOTONES_MODAL_CAJA_PERMITIDOS
+
+
 async def _cerrar_modal_caja(page, log):
     """Cierra el modal 'Debe cerrar la caja' si aparece (sin cerrar caja)."""
+    from playwright.async_api import TimeoutError as PlaywrightTimeout
     try:
         modal = await page.wait_for_selector(
             'text="Debe cerrar la caja"', timeout=3000)
-        if modal:
-            log('  ⚠ Modal "Debe cerrar la caja" detectado — cerrando sin modificar nada...')
-            # Buscar botón "Quedarse aquí" o "Cerrar" o el X del modal
-            botones = await page.query_selector_all('button')
-            for btn in botones:
-                texto = await btn.inner_text()
-                if any(x in texto.lower() for x in ['quedarse', 'cerrar', 'cancelar', 'no']):
-                    await btn.click()
-                    await page.wait_for_timeout(500)
-                    return
-            # Si no encontró botón, intentar presionar Escape
-            await page.keyboard.press('Escape')
+    except PlaywrightTimeout:
+        return  # No apareció el modal, todo bien
+    if not modal:
+        return
+    log('  ⚠ Modal "Debe cerrar la caja" detectado — cerrando sin modificar nada...')
+    # FIX: antes se pulsaba el primer botón que CONTUVIERA "cerrar" o "no" (¡incluido "Cerrar caja"!).
+    # Ahora solo botones de una lista blanca exacta; si no hay ninguno, Escape.
+    for btn in await page.query_selector_all('button'):
+        texto = await btn.inner_text()
+        if boton_modal_permitido(texto):
+            log(f'  Pulsando "{texto.strip()}"')
+            await btn.click()
             await page.wait_for_timeout(500)
-    except Exception:
-        pass  # No apareció el modal, todo bien
+            return
+    log('  Ningún botón seguro en el modal: se cierra con Escape.')
+    await page.keyboard.press('Escape')
+    await page.wait_for_timeout(500)
+
+
+def extraer_download_url(status_data):
+    """URL del archivo listo en la respuesta de estado de una tarea celery."""
+    # FIX: antes faltaban paréntesis y `a or b or c if cond else d` se evaluaba como
+    # `(a or b or c) if cond else d`: si 'result' no era dict se perdían 'url' y 'file_url'
+    resultado = status_data.get('result')
+    return (status_data.get('url') or
+            status_data.get('file_url') or
+            (resultado.get('url') if isinstance(resultado, dict) else status_data.get('file')))
 
 
 async def _descargar_sincrono(page, url, destino, nombre_archivo, log):
@@ -236,6 +272,7 @@ async def _descargar_celery(page, url, destino, nombre_archivo, log):
     2. Si es JSON con task_id → polling hasta que el archivo esté listo
     3. Descargar el archivo final
     """
+    from playwright.async_api import Error as PlaywrightError
     log(f'  Solicitando generación de {nombre_archivo} (celery)...')
     ruta_final = os.path.join(destino, nombre_archivo)
 
@@ -259,7 +296,7 @@ async def _descargar_celery(page, url, destino, nombre_archivo, log):
     # Si es JSON, buscar task_id o url de descarga
     try:
         data = await response.json()
-    except Exception:
+    except (ValueError, PlaywrightError):   # FIX: antes except Exception
         # Puede que sea el archivo de todas formas
         body = await response.body()
         if len(body) > 1000:  # Probablemente es un Excel
@@ -308,17 +345,16 @@ async def _descargar_celery(page, url, destino, nombre_archivo, log):
                             estado = status_data.get('state') or status_data.get('status') or ''
 
                             if estado.upper() in ('SUCCESS', 'COMPLETED', 'DONE', 'READY'):
-                                download_url = (status_data.get('url') or
-                                                status_data.get('file_url') or
-                                                status_data.get('result', {}).get('url') if isinstance(status_data.get('result'), dict) else
-                                                status_data.get('file'))
+                                download_url = extraer_download_url(status_data)
                                 if download_url:
                                     break
                             elif estado.upper() in ('FAILURE', 'FAILED', 'ERROR'):
                                 raise RuntimeError(f'Task celery falló para {nombre_archivo}')
                     except (json.JSONDecodeError, RuntimeError):
                         raise
-                    except Exception:
+                    except (PlaywrightError, ValueError, AttributeError) as e:
+                        # FIX: antes except Exception silencioso; este endpoint de estado no aplica
+                        logger.debug('Estado celery no disponible en %s: %s', status_path, e)
                         continue
 
                 if download_url:
@@ -352,8 +388,9 @@ async def _descargar_celery(page, url, destino, nombre_archivo, log):
                 href = await links[0].get_attribute('href')
                 if href:
                     download_url = href if href.startswith('http') else base_url + href
-        except Exception:
-            pass
+        except PlaywrightError as e:
+            # FIX: antes except Exception: pass
+            logger.warning('No se pudo revisar las notificaciones de Negosy: %s', e)
 
     if not download_url:
         # Último intento: buscar el archivo directamente en media/temp_files
@@ -383,7 +420,9 @@ async def _descargar_celery(page, url, destino, nombre_archivo, log):
                     if len(body) > 500:
                         download_url = base_url + path
                         break
-            except Exception:
+            except PlaywrightError as e:
+                # FIX: antes except Exception silencioso
+                logger.debug('No existe %s: %s', path, e)
                 continue
 
     if not download_url:
@@ -504,7 +543,10 @@ async def extraer_datos_async(carpeta_destino, usuario, contrasena,
     if fecha_inicio is None:
         fecha_inicio = fecha_fin - timedelta(days=730)  # 2 años
 
-    os.makedirs(carpeta_destino, exist_ok=True)
+    # FIX: cada extracción va a su propia subcarpeta con fecha y hora; antes todas se mezclaban en
+    # la misma carpeta y las descargas de días distintos se solapaban
+    carpeta_destino = carpeta_descarga(carpeta_destino)
+    log(f'Guardando esta descarga en: {carpeta_destino}')
     resultado = {}
 
     async with async_playwright() as p:
@@ -575,8 +617,9 @@ def cargar_config():
             with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             defaults.update(config)
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError):
+            # FIX: antes except Exception: pass
+            logger.exception('No se pudo leer %s; se usan valores por defecto', CONFIG_PATH)
     return defaults
 
 

@@ -31,6 +31,9 @@ from preve_ui import (S, f, Btn, Card, Chip, ProgressBar, Toasts, label, entry, 
                       DANGER, BRAND_ORANGE)
 import preve_datos as dt
 import preve_vistas as vs
+from preve_utils import safe_int, get_logger, configurar_logging
+
+logger = get_logger('app')
 
 # ══════════════════════════════════════════════════════════════════
 # Frases, consejos y datos curiosos para mostrar mientras se genera
@@ -122,8 +125,9 @@ def notificar_windows(titulo, mensaje):
     try:
         subprocess.Popen(['powershell', '-NoProfile', '-WindowStyle', 'Hidden', '-EncodedCommand', cod],
                          creationflags=0x08000000)
-    except Exception:
-        pass
+    except OSError:
+        # FIX: antes except Exception: pass
+        logger.warning('No se pudo mostrar la notificación de Windows', exc_info=True)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -395,7 +399,7 @@ class Paleta:
         res = self.app.datos.buscar(self.var.get(), limite=4)
         for r in res['recomendacion']:
             self.items.append(dict(grupo='En la recomendación', titulo=r['nombre'] or r['sku'],
-                                   sub=f'{r["sku"]} · {r["accion"]}' + (f' · comprar {int(r["compra_sugerida_unid"])} u'
+                                   sub=f'{r["sku"]} · {r["accion"]}' + (f' · comprar {safe_int(r["compra_sugerida_unid"])} u'
                                                                          if r['accion'] == 'RECOMPRAR' else ''),
                                    chip=r['urgencia'] if r['accion'] == 'RECOMPRAR' else None,
                                    go=lambda r=r: self.app.ir('recom', sku=r['sku'])))
@@ -483,6 +487,7 @@ class PreveApp:
         root.protocol('WM_DELETE_WINDOW', self._cerrar)
         self._poll_ui()
         self.ir('inicio')
+        self.root.after(300, self._avisar_ciclo_corrupto)
 
     # ── estructura ─────────────────────────────────────────
     def _construir(self):
@@ -659,6 +664,12 @@ class PreveApp:
     def recargar_datos(self):
         self.datos = dt.Datos(self.carpeta('salida'), self.sucursal)
         self.actualizar_sidebar()
+        self._avisar_ciclo_corrupto()
+
+    def _avisar_ciclo_corrupto(self):
+        # FIX: un ciclo_estado.json dañado ya no se reinicia en silencio: se pide intervención
+        if getattr(self.datos, 'error_ciclo', None):
+            messagebox.showerror('PREVÉ — ciclo de compras', self.datos.error_ciclo)
 
     def menu_informe(self, btn):
         m = menu(self.root)
@@ -814,14 +825,24 @@ class PreveApp:
                     if m and 1 <= int(m.group(1)) <= 7:
                         self.carga.set_paso(int(m.group(1)))
                 elif tipo == 'fin':
-                    self._al_terminar_ok()
+                    # FIX: try/finally — si _al_terminar_ok falla, la app no queda bloqueada en "generando"
+                    try:
+                        self._al_terminar_ok()
+                    except Exception as e:  # noqa: BLE001 — se muestra en pantalla, no se pierde
+                        logger.exception('Falló la actualización de la interfaz tras el análisis')
+                        self.carga.mostrar_error(f'El análisis terminó, pero falló al mostrar los resultados: '
+                                                 f'{e}\n\n{traceback.format_exc()}')
+                    finally:
+                        self.generando = False
                     return
                 elif tipo == 'error':
-                    self.generando = False
-                    self.carga.mostrar_error(dato)
-                    if self.root.state() == 'iconic':
-                        self.root.deiconify()
-                        notificar_windows('PREVÉ', 'El análisis no se pudo completar. Revisa el detalle.')
+                    try:
+                        self.carga.mostrar_error(dato)
+                        if self.root.state() == 'iconic':
+                            self.root.deiconify()
+                            notificar_windows('PREVÉ', 'El análisis no se pudo completar. Revisa el detalle.')
+                    finally:
+                        self.generando = False
                     return
         except queue.Empty:
             pass
@@ -836,7 +857,7 @@ class PreveApp:
         dt.guardar_config(self.cfg)
         minimizada = self.root.state() == 'iconic'
         self.carga.terminar()
-        self.generando = False
+        self.generando = False     # antes de ir(): ir() no navega mientras generando es True
         self.recargar_datos()
         if minimizada:
             self.root.deiconify()
@@ -857,6 +878,7 @@ class PreveApp:
 
 
 if __name__ == '__main__':
+    configurar_logging()
     ui.init_dpi()
     root = tk.Tk()
     app = PreveApp(root)

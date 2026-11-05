@@ -12,6 +12,10 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import font as tkfont
 
+from preve_utils import get_logger
+
+logger = get_logger('ui')
+
 # ── Paleta ─────────────────────────────────────────────────────────
 BG = '#F7F8F6'
 SURFACE = '#FFFFFF'
@@ -65,13 +69,14 @@ F_MONO = 'Consolas'
 def init_dpi():
     """Hay que llamarlo ANTES de crear la ventana para que el texto sea nítido."""
     if sys.platform.startswith('win'):
+        # FIX: excepciones específicas en vez de except Exception: pass (Windows antiguos no tienen shcore)
         try:
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
+        except (AttributeError, OSError):
             try:
                 ctypes.windll.user32.SetProcessDPIAware()
-            except Exception:
-                pass
+            except (AttributeError, OSError):
+                logger.info('No se pudo activar el modo DPI; el texto puede verse borroso')
 
 
 def S(v):
@@ -83,7 +88,7 @@ def init_ui(root):
     global SCALE, F_UI, F_MONO
     try:
         SCALE = max(1.0, root.winfo_fpixels('1i') / 96.0)
-    except Exception:
+    except tk.TclError:   # FIX: antes except Exception
         SCALE = 1.0
     # Fuentes opcionales: si pones Inter / JetBrains Mono (.ttf) en la carpeta "fonts" se usan solas.
     carpeta = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
@@ -92,8 +97,9 @@ def init_ui(root):
             if nombre.lower().endswith(('.ttf', '.otf')):
                 try:
                     ctypes.windll.gdi32.AddFontResourceExW(os.path.join(carpeta, nombre), 0x10, 0)
-                except Exception:
-                    pass
+                except (AttributeError, OSError):
+                    # FIX: antes except Exception: pass
+                    logger.warning('No se pudo cargar la fuente %s', nombre)
     familias = set(tkfont.families(root))
     F_UI = 'Inter' if 'Inter' in familias else 'Segoe UI'
     F_MONO = 'JetBrains Mono' if 'JetBrains Mono' in familias else 'Consolas'
@@ -119,7 +125,7 @@ def _init_styles(root):
 def _bg(widget):
     try:
         return widget.cget('bg')
-    except Exception:
+    except (tk.TclError, AttributeError):   # FIX: antes except Exception (widget sin opción bg)
         return BG
 
 

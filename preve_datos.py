@@ -12,12 +12,17 @@ del CSV; si no se puede calcular, se devuelve None y la interfaz muestra "—".
 """
 import os
 import json
+import shutil
+import sqlite3
 import datetime
 import numpy as np
 import pandas as pd
 
 import preve_historial as hist
-from preve_ciclo import cargar_estado_ciclo, CICLO_INTERNACIONAL_DIAS, LEAD_TIME_INTERNACIONAL
+from preve_ciclo import cargar_estado_ciclo, CicloCorruptoError, CICLO_INTERNACIONAL_DIAS, LEAD_TIME_INTERNACIONAL
+from preve_utils import get_logger
+
+logger = get_logger('datos')
 
 HORIZONTE_DIAS = 141
 LEAD = LEAD_TIME_INTERNACIONAL
@@ -37,31 +42,60 @@ def config_defecto():
         'sucursal': 'San José',
         'sucursales': {s: {'entrada': '', 'salida': ''} for s in SUCURSALES},
         'ultima_duracion_s': None,
+        # True si el ERP registra cada venta también como "Salida" de almacén (evita doble descuento).
+        # Con los reportes de Yuju (nov-2026) las salidas son ajustes manuales (~1% de las ventas): False.
+        'ventas_son_salidas_de_almacen': False,
+        # Ídem para compras y "Entrada" de almacén.
+        'compras_son_entradas_de_almacen': False,
     }
+
+
+def _respaldar_corrupto(ruta):
+    """Copia un archivo ilegible a <ruta>.corrupto-<timestamp> antes de que se sobrescriba."""
+    destino = f'{ruta}.corrupto-{datetime.datetime.now():%Y%m%d-%H%M%S}'
+    try:
+        shutil.copy2(ruta, destino)
+        logger.error('Configuración ilegible; respaldada en %s y se usan valores por defecto', destino)
+    except OSError:
+        logger.exception('No se pudo respaldar la configuración corrupta %s', ruta)
+    return destino
 
 
 def cargar_config():
     cfg = config_defecto()
+    # FIX: antes cualquier error se silenciaba y el archivo corrupto se sobrescribía con los defaults
     try:
         with open(_CONFIG_PATH, 'r', encoding='utf-8') as f:
             guardada = json.load(f)
-        for k, v in guardada.items():
-            if k == 'sucursales':
-                for s, d in v.items():
-                    cfg['sucursales'].setdefault(s, {'entrada': '', 'salida': ''}).update(d)
-            else:
-                cfg[k] = v
-    except Exception:
-        pass
+    except FileNotFoundError:
+        return cfg
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        _respaldar_corrupto(_CONFIG_PATH)
+        return cfg
+    except OSError:
+        logger.exception('No se pudo leer %s', _CONFIG_PATH)
+        return cfg
+    if not isinstance(guardada, dict):
+        _respaldar_corrupto(_CONFIG_PATH)
+        return cfg
+    for k, v in guardada.items():
+        if k == 'sucursales' and isinstance(v, dict):
+            for s, d in v.items():
+                cfg['sucursales'].setdefault(s, {'entrada': '', 'salida': ''}).update(d)
+        else:
+            cfg[k] = v
     return cfg
 
 
 def guardar_config(cfg):
+    # FIX: escritura atómica (archivo temporal + reemplazo) y error registrado en el log
+    tmp = _CONFIG_PATH + '.tmp'
     try:
-        with open(_CONFIG_PATH, 'w', encoding='utf-8') as f:
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+        os.replace(tmp, _CONFIG_PATH)
+    except (OSError, TypeError, ValueError):
+        logger.exception('No se pudo guardar la configuración en %s', _CONFIG_PATH)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -214,6 +248,7 @@ class Datos:
         self.decisiones = {}
         self.comparacion = None
         self.scorecard = None
+        self.error_ciclo = None
         carpeta = self.carpeta
         if not carpeta or not os.path.isdir(carpeta):
             return
@@ -223,16 +258,24 @@ class Datos:
                 raw = pd.read_csv(csv_path, dtype={'sku': str})
                 self.fecha_datos = datetime.datetime.fromtimestamp(os.path.getmtime(csv_path))
                 self.df = derivar(raw)
-            except Exception:
+            except (OSError, ValueError, pd.errors.ParserError):
+                # FIX: antes except Exception silencioso
+                logger.exception('No se pudo leer %s', csv_path)
                 self.df = None
-        self.ciclo = cargar_estado_ciclo(carpeta)
+        # FIX: un ciclo corrupto ya no se reinicia en silencio: se informa a la interfaz
+        try:
+            self.ciclo = cargar_estado_ciclo(carpeta)
+        except CicloCorruptoError as e:
+            self.error_ciclo = str(e)
+            self.ciclo = None
         self.ciclo_num = (self.ciclo or {}).get('ciclo_numero', 0)
         try:
             self.decisiones = hist.cargar_decisiones(carpeta, self.ciclo_num, self.sucursal)
-            self.comparacion = hist.comparar_ultimas(carpeta)
-            self.scorecard = hist.ultimo_scorecard(carpeta)
-        except Exception:
-            pass
+            # FIX: comparación y scorecard de la sucursal activa
+            self.comparacion = hist.comparar_ultimas(carpeta, self.sucursal)
+            self.scorecard = hist.ultimo_scorecard(carpeta, self.sucursal)
+        except sqlite3.Error:
+            logger.exception('No se pudo leer el historial de %s', carpeta)
 
     @property
     def tiene_datos(self):
@@ -370,10 +413,12 @@ class Datos:
             res['recomendacion'] = sub.to_dict('records')
         try:
             vistos = {r['sku'] for r in res['recomendacion']}
-            res['historial'] = [h for h in hist.buscar_en_historial(self.carpeta, texto, limite + 3)
+            res['historial'] = [h for h in hist.buscar_en_historial(self.carpeta, texto, limite + 3,
+                                                                    sucursal=self.sucursal)
                                 if h['sku'] not in vistos][:limite]
-        except Exception:
-            pass
+        except sqlite3.Error:
+            # FIX: antes except Exception silencioso
+            logger.exception('Búsqueda en el historial falló')
         for base in (self.carpeta, os.path.dirname(self.carpeta or '')):
             ruta = os.path.join(base or '', 'PREVE_Traslados_Sugeridos.csv')
             if os.path.exists(ruta):
@@ -382,7 +427,8 @@ class Datos:
                     m = (t['sku'].str.lower() + ' ' + t['nombre'].fillna('').str.lower()).str.contains(
                         texto, regex=False)
                     res['traslados'] = t[m].head(limite).to_dict('records')
-                except Exception:
-                    pass
+                except (OSError, KeyError, ValueError, pd.errors.ParserError):
+                    # FIX: antes except Exception silencioso
+                    logger.exception('No se pudo leer %s', ruta)
                 break
         return res

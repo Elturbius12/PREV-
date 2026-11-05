@@ -40,7 +40,8 @@ def calcular_metricas_pronostico(recom_anterior, ventas_reales_periodo, log=prin
     df = recom_anterior[['sku']].copy()
     for col in ['demanda_p50_141d', 'demanda_p10_141d', 'demanda_p90_141d',
                 'stock_actual', 'compra_sugerida_unid', 'accion', 'clase_abc',
-                'nombre', 'categoria', 'costo_puesto_almacen_pen']:
+                'nombre', 'categoria', 'costo_puesto_almacen_pen',
+                'precio_regular_pen']:   # FIX: sin el precio, el ROI salía siempre S/ 0
         if col in recom_anterior.columns:
             df[col] = recom_anterior[col].values
 
@@ -190,12 +191,16 @@ def estimar_roi(metricas_sku, contrafactual, resumen_contra, log=print):
     unidades_salvadas = unidades_salvadas.clip(lower=0)
 
     # Precio neto (sin IGV)
-    precio_neto = np.where(
-        df.get('precio_regular_pen', pd.Series(0)).notna(),
-        df.get('precio_regular_pen', 0) / 1.18,
-        costo * 1.3  # margen estimado si no hay precio
-    )
-    margen_unitario = precio_neto - costo
+    # FIX: antes df.get(..., pd.Series(0)) devolvía una Serie de largo 1 cuando faltaba la columna y
+    # np.where la difundía como precio 0 para todos; ahora se trabaja sobre arrays alineados al df
+    if 'precio_regular_pen' in df.columns:
+        precio = pd.to_numeric(df['precio_regular_pen'], errors='coerce').to_numpy(dtype=float)
+    else:
+        precio = np.full(len(df), np.nan)
+    costo_arr = costo.to_numpy(dtype=float)
+    precio_neto = np.where(~np.isnan(precio), precio / 1.18,
+                           costo_arr * 1.3)  # margen estimado si no hay precio
+    margen_unitario = pd.Series(precio_neto - costo_arr, index=df.index)
     df['venta_recuperada_valor'] = unidades_salvadas * margen_unitario
 
     beneficio_ventas = float(df['venta_recuperada_valor'].clip(lower=0).sum())

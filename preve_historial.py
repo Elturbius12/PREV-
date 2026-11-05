@@ -299,16 +299,26 @@ def cargar_decisiones(carpeta_salida, ciclo, sucursal='San José'):
 # ══════════════════════════════════════════════════════════════════
 # Consultas para la interfaz (comparación, scorecard, búsqueda)
 # ══════════════════════════════════════════════════════════════════
-def comparar_ultimas(carpeta_salida):
-    """Compara la última ejecución con la anterior.
+def _filtro_sucursal(sucursal, alias=''):
+    """Fragmento WHERE + parámetros para filtrar por sucursal (sin filtro si sucursal es None)."""
+    if not sucursal:
+        return '', []
+    return f' WHERE {alias}sucursal = ?', [sucursal]
+
+
+def comparar_ultimas(carpeta_salida, sucursal=None):
+    """Compara la última ejecución con la anterior (de la misma sucursal si se indica).
 
     Returns None si no hay historial; si no hay anterior, 'previa' es None.
     """
     if not historial_existe(carpeta_salida):
         return None
     conn = _conectar(carpeta_salida)
+    # FIX: antes se comparaban ejecuciones de sucursales distintas
+    where, params = _filtro_sucursal(sucursal)
     filas = conn.execute(
-        "SELECT id, fecha, inversion_total, skus_recomprar, etiqueta FROM ejecuciones ORDER BY id DESC LIMIT 2"
+        "SELECT id, fecha, inversion_total, skus_recomprar, etiqueta FROM ejecuciones"
+        f"{where} ORDER BY id DESC LIMIT 2", params
     ).fetchall()
     if not filas:
         conn.close()
@@ -325,23 +335,32 @@ def comparar_ultimas(carpeta_salida):
     return {'actual': actual, 'previa': previa, 'previa_por_sku': por_sku}
 
 
-def ultimo_scorecard(carpeta_salida):
-    """{'wmape', 'calificacion'} de la última validación real, o None."""
+def ultimo_scorecard(carpeta_salida, sucursal=None):
+    """{'wmape', 'calificacion'} de la última validación real (de la sucursal si se indica), o None."""
     if not historial_existe(carpeta_salida):
         return None
     conn = _conectar(carpeta_salida)
-    f = conn.execute("SELECT wmape, calificacion FROM metricas WHERE wmape IS NOT NULL ORDER BY id DESC LIMIT 1"
-                     ).fetchone()
+    # FIX: filtro por sucursal (vía la ejecución a la que pertenece la métrica)
+    params = []
+    sql = ("SELECT m.wmape, m.calificacion FROM metricas m JOIN ejecuciones e ON e.id = m.ejecucion_id "
+           "WHERE m.wmape IS NOT NULL")
+    if sucursal:
+        sql += " AND e.sucursal = ?"
+        params.append(sucursal)
+    f = conn.execute(sql + " ORDER BY m.id DESC LIMIT 1", params).fetchone()
     conn.close()
     return {'wmape': f[0], 'calificacion': f[1]} if f else None
 
 
-def ejecuciones_con_diff(carpeta_salida, ultimas_n=50):
+def ejecuciones_con_diff(carpeta_salida, ultimas_n=50, sucursal=None):
     """Ejecuciones recientes con la variación de inversión respecto a la ejecución anterior."""
     if not historial_existe(carpeta_salida):
         return pd.DataFrame()
     conn = _conectar(carpeta_salida)
-    df = pd.read_sql_query("SELECT * FROM ejecuciones ORDER BY id DESC LIMIT ?", conn, params=[ultimas_n + 1])
+    # FIX: la "ejecución anterior" debe ser de la misma sucursal
+    where, params = _filtro_sucursal(sucursal)
+    df = pd.read_sql_query(f"SELECT * FROM ejecuciones{where} ORDER BY id DESC LIMIT ?", conn,
+                           params=params + [ultimas_n + 1])
     conn.close()
     if df.empty:
         return df
@@ -350,19 +369,28 @@ def ejecuciones_con_diff(carpeta_salida, ultimas_n=50):
     return df.head(ultimas_n)
 
 
-def buscar_en_historial(carpeta_salida, texto, limite=6):
+def buscar_en_historial(carpeta_salida, texto, limite=6, sucursal=None):
     """Productos que coinciden con el texto en recomendaciones pasadas (último registro por SKU)."""
     if not historial_existe(carpeta_salida) or not texto.strip():
         return []
     q = f'%{texto.strip()}%'
     conn = _conectar(carpeta_salida)
-    filas = conn.execute("""
-        SELECT r.sku, r.nombre, r.accion, r.compra_sugerida, e.fecha, COUNT(*) AS veces
-        FROM recomendaciones r JOIN ejecuciones e ON e.id = r.ejecucion_id
-        WHERE r.nombre LIKE ? OR r.sku LIKE ?
-        GROUP BY r.sku
-        ORDER BY MAX(e.id) DESC LIMIT ?
-    """, (q, q, limite)).fetchall()
+    # FIX: antes GROUP BY sku devolvía nombre/acción de una fila arbitraria; ahora ROW_NUMBER()
+    # toma explícitamente el registro más reciente de cada SKU
+    filtro_suc = ' AND e.sucursal = ?' if sucursal else ''
+    params = [q, q] + ([sucursal] if sucursal else []) + [limite]
+    filas = conn.execute(f"""
+        WITH coincidencias AS (
+            SELECT r.sku, r.nombre, r.accion, r.compra_sugerida, e.fecha, e.id AS ej_id,
+                   ROW_NUMBER() OVER (PARTITION BY r.sku ORDER BY e.id DESC) AS rn,
+                   COUNT(*) OVER (PARTITION BY r.sku) AS veces
+            FROM recomendaciones r JOIN ejecuciones e ON e.id = r.ejecucion_id
+            WHERE (r.nombre LIKE ? OR r.sku LIKE ?){filtro_suc}
+        )
+        SELECT sku, nombre, accion, compra_sugerida, fecha, veces
+        FROM coincidencias WHERE rn = 1
+        ORDER BY ej_id DESC LIMIT ?
+    """, params).fetchall()
     conn.close()
     return [{'sku': f[0], 'nombre': f[1], 'accion': f[2], 'compra': f[3], 'fecha': f[4], 'veces': f[5]}
             for f in filas]
