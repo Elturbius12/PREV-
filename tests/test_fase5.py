@@ -82,8 +82,9 @@ def test_motivo_explica_valores_y_cantidad():
 @pytest.mark.parametrize('kw,esperada', [
     (dict(stock_actual=10, margen_pct=0.2), 'RECOMPRAR'),                     # stock_dias 10 < LT 36
     (dict(stock_actual=10, margen_pct=-0.1, clase_abc='A'), 'NEGOCIAR'),      # sin margen no recompra…
-    # …y si no es clase A no cumple ninguna regla: cae en la acción por defecto (hueco reportado)
-    (dict(stock_actual=10, margen_pct=-0.1, clase_abc='B'), 'MANTENER'),
+    # …y si no es clase A: REVISAR_COMPRA (Fase 6, antes caía en MANTENER por defecto)
+    (dict(stock_actual=10, margen_pct=-0.1, clase_abc='B'), 'REVISAR_COMPRA'),
+    (dict(stock_actual=10, margen_pct=0.3, dato_incompleto=True), 'REVISAR_COMPRA'),
     (dict(stock_actual=500, demanda_p50_141d=141), 'LIQUIDAR'),               # 500 días, rotación 0.28
     (dict(stock_actual=45, margen_pct=0.05, clase_abc='A'), 'NEGOCIAR'),
     (dict(stock_actual=45, margen_pct=0.5, venta_sem_reciente=3), 'PUBLICITAR'),
@@ -134,11 +135,15 @@ def test_sembrar_es_idempotente_y_no_pisa_ediciones():
     db = Database.default()
     db.guardar_plantilla_categorias('RETAIL', [{'accion': 'X', 'cuando': 'formato Fase 3'}], 'vieja', True)
     assert 'RETAIL' in sembrar(db)                                # el formato antiguo se reemplaza
-    editada = rg.copiar(PLANTILLA_RETAIL)
-    editada['accion_por_defecto'] = 'VIGILAR'
-    rg.guardar_plantilla(editada, db, es_sistema=True)
-    assert sembrar(db) == []                                      # no se pisa lo editado
-    assert rg.cargar_plantilla('RETAIL', db)['accion_por_defecto'] == 'VIGILAR'
+    assert sembrar(db) == []                                      # idempotente
+    vieja = rg.copiar(PLANTILLA_RETAIL)
+    vieja['version'] = 1
+    rg.guardar_plantilla(vieja, db, es_sistema=True)
+    assert sembrar(db) == ['RETAIL']                              # versión anterior → se actualiza
+    propia = dict(rg.copiar(PLANTILLA_RETAIL), nombre='RETAIL_PROPIA', accion_por_defecto='VIGILAR')
+    rg.guardar_plantilla(propia, db)
+    sembrar(db)
+    assert rg.cargar_plantilla('RETAIL_PROPIA', db)['accion_por_defecto'] == 'VIGILAR'   # lo propio no se toca
     assert {'RETAIL', 'RETAIL_CLASICO', 'MANUFACTURA', 'DISTRIBUCION'} <= set(db.listar_plantillas_categorias()['nombre'])
 
 

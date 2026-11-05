@@ -53,6 +53,7 @@ CHIPS = {                          # (texto, fondo)
     'TRASLADAR': ('#2F7F86', '#DDEEF0'),
     # Fase 5: acciones de las plantillas RETAIL / MANUFACTURA / DISTRIBUCION
     'MANTENER': ('#2F7656', OK_BG),
+    'REVISAR_COMPRA': ('#8E6119', WARN_BG),
     'DESCONTINUAR': (TEXT_DIM, CARD_ALT),
     'REPONER': (ACCENT, ACCENT_TINT),
     'REABASTECER': (ACCENT, ACCENT_TINT),

@@ -235,7 +235,7 @@ def guardar_plantilla(p, db=None, es_sistema=False):
     validar_plantilla(p)
     db = db or Database.default()
     cuerpo = {k: p[k] for k in ('reglas', 'accion_por_defecto', 'acciones_de_compra', 'motivo_por_defecto',
-                                'colores') if k in p}
+                                'colores', 'version') if k in p}
     db.guardar_plantilla_categorias(p['nombre'], cuerpo, p.get('descripcion', ''), es_plantilla_sistema=es_sistema)
 
 

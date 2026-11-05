@@ -23,6 +23,7 @@ UMBRAL_NEGOCIAR = 0.10
 
 PLANTILLA_RETAIL = {
     'nombre': 'RETAIL',
+    'version': 2,          # v2 (Fase 6): regla REVISAR_COMPRA
     'descripcion': 'Tienda minorista (predeterminada). RECOMPRAR solo cuando el stock no llega al próximo '
                    'pedido; MANTENER cuando alcanza; LIQUIDAR / REDUCIR el exceso; DESCONTINUAR lo que no se '
                    'vende hace 6 meses.',
@@ -38,6 +39,10 @@ PLANTILLA_RETAIL = {
          'condiciones': [c('stock_dias', '>', 90), c('rotacion', '<', 0.3)]},
         {'accion': 'NEGOCIAR', 'descripcion': f'Alto volumen con margen menor al {UMBRAL_NEGOCIAR:.0%}',
          'condiciones': [c('margen', '<', UMBRAL_NEGOCIAR), c('volumen_alto', '==', 1)]},
+        # Fase 6: cierra el hueco detectado en la Fase 5 (59 productos reales caían en MANTENER por defecto)
+        {'accion': 'REVISAR_COMPRA', 'descripcion': 'Se queda sin stock antes del lead time pero su margen no es '
+                                                     'positivo (o es desconocido): decidir si vale la pena reponerlo',
+         'condiciones': [c('stock_dias', '<', var('lead_time'))]},
         {'accion': 'PUBLICITAR', 'descripcion': 'Buen margen pero vende menos del 70% de lo pronosticado',
          'condiciones': [c('margen', '>', 0.4), c('ventas_sem', '<', var('pronostico_sem', 0.7))]},
         {'accion': 'REDUCIR', 'descripcion': 'Más de 60 días de stock y stock mayor a 1.5 × la demanda del horizonte',
@@ -115,9 +120,9 @@ PLANTILLAS_SISTEMA = [PLANTILLA_RETAIL, PLANTILLA_RETAIL_CLASICO, PLANTILLA_MANU
 
 
 def sembrar(db=None, forzar=False):
-    """Crea las plantillas del sistema que falten (o reemplaza las del formato antiguo de la Fase 3).
-
-    No pisa una plantilla que el usuario ya editó, salvo forzar=True.
+    """Crea las plantillas del sistema que falten, reemplaza las del formato antiguo (Fase 3) y actualiza
+    las de una versión anterior. Las ediciones del usuario se guardan siempre como copia con otro nombre
+    (ver preve_editor_plantillas), así que actualizar una plantilla del sistema no pisa nada propio.
     """
     from database import Database
     from preve_reglas import guardar_plantilla
@@ -127,7 +132,8 @@ def sembrar(db=None, forzar=False):
     creadas = []
     for p in PLANTILLAS_SISTEMA:
         guardada = actuales.get(p['nombre'])
-        if forzar or guardada is None or not isinstance(guardada, dict):
+        desactualizada = isinstance(guardada, dict) and guardada.get('version', 1) < p.get('version', 1)
+        if forzar or guardada is None or not isinstance(guardada, dict) or desactualizada:
             guardar_plantilla(p, db, es_sistema=True)
             creadas.append(p['nombre'])
     return creadas

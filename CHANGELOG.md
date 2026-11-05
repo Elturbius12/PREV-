@@ -2,6 +2,35 @@
 
 Todos los cambios relevantes de PREVÉ, organizados por fase.
 
+## [Fase 6] — 2026-11-05 · Modo backtesting con walk-forward validation
+
+### Agregado
+- `preve_backtesting.py`.
+  - **`DatosBacktest`** lee los reportes con las mismas reglas que el pipeline.
+  - **`Backtester.run(inicio, fin)`** hace la validación *walk-forward*: en cada ventana (alineada al lunes, de `dias_entre_importaciones` días) entrena **solo con ventas anteriores** y compara contra lo vendido.
+  - **Métricas:** MAPE con sMAPE cuando la venta real es 0, WMAPE, MAE, RMSE y sesgo, por producto, ventana y modelo.
+  - **Datos insuficientes (6.2):** ventana sin datos globales, solo compras, producto sin primera venta (se omite) y demanda intermitente (se evalúa).
+  - **Día de reporte final del ciclo:** sugerencia de compra "a medianoche" validada contra las ventas reales del horizonte. Si el horizonte todavía no terminó, la venta se extrapola y se marca como parcial.
+  - **Cancelación** entre ventanas.
+- Todo queda en la base (6.5): `metricas_periodo` (por producto y por modelo), `pronosticos` con `venta_real` y `ejecuciones_backtesting`.
+- Excel `reportes_backtesting/backtesting_YYYY-MM-DD_HH-MM.xlsx`: Resumen General (métricas, evolución, por modelo, top 20 peor y mejor), Resumen por Modelo, una hoja por período (Código | Nombre | Modelo | Clasif | Pronóstico | Real | Error Abs | Error % | Bias), Simulación Compras y Ventanas omitidas.
+- Interfaz: botón **naranja "Modo Backtesting"** en la barra superior. Oculta Inicio (dashboard), Recomendaciones, Decisión rápida y Simular (y con ellos el botón de informes), y muestra la vista Backtesting con rango (por defecto 6 meses), ventana, progreso y log en tiempo real, cancelación, resumen, botón para abrir el Excel y ejecuciones anteriores. Al desactivarlo todo queda guardado.
+- RETAIL v2: regla **REVISAR_COMPRA** (stock bajo el lead time sin margen positivo), que cierra el hueco de la Fase 5. No cuenta como compra automática. Las plantillas del sistema ahora tienen versión y se actualizan solas.
+- `tests/test_fase6.py` (12 tests, con un pronosticador falso que verifica la ausencia de fuga de información).
+
+### Primer backtesting real (San José, 22-abr → 22-oct-2026, ventanas de 14 días, 8 min)
+| Modelo | Productos | MAPE | WMAPE | Sesgo (u/ventana) |
+|---|---|---|---|---|
+| LightGBM | 221 | 142% | 66% | +1.4 |
+| CatBoost | 1.132 | 129% | 87% | −6.0 (subestima) |
+| Croston-TSB | 1.075 | 196% | 133% | +1.7 |
+| **Total** | 1.665 | 171% | ~98% | |
+
+El MAPE está dominado por la demanda intermitente: el sMAPE vale 200% cuando hay pronóstico y la venta fue 0. El WMAPE es más representativo.
+
+### Bug encontrado (no estaba en la auditoría; reportado y pendiente de aprobación)
+- **`reconstruir_stock` deja NaN el stock histórico** de los productos con días sin movimiento: `pivot()` crea NaN y `reindex(fill_value=0)` no los rellena. Al 02-ago-2026 solo 26 de 2.067 productos tienen stock numérico. No afecta la recomendación (usa el stock del día del listado). Sí afecta el conteo de stock negativo histórico y la **Simulación Compras** del backtesting, que queda inválida hasta corregirlo.
+
 ## [Fase 5] — 2026-11-05 · Plantillas de categorías + editor visual
 
 ### Agregado

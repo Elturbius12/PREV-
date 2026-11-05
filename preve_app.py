@@ -457,8 +457,13 @@ class Paleta:
 # ══════════════════════════════════════════════════════════════════
 # Aplicación
 # ══════════════════════════════════════════════════════════════════
+# Fase 6: en modo backtesting se ocultan el dashboard (Inicio), las sugerencias y los informes
+OCULTAS_EN_BACKTESTING = {'inicio', 'recom', 'decision', 'simular'}
+SOLO_EN_BACKTESTING = {'backtesting'}
+
 NAV = [('inicio', 'Inicio', '⌂'), ('generar', 'Generar', '▶'), ('recom', 'Recomendaciones', '☰'),
        ('decision', 'Decisión rápida', '⚡'), ('simular', 'Simular', '◐'), ('historial', 'Historial', '↺'),
+       ('backtesting', 'Backtesting', '⟲'),
        ('config', 'Configuración', '⚙')]
 
 
@@ -469,6 +474,8 @@ class PreveApp:
         self.cfg = dt.cargar_config()
         self.sucursal = self.cfg['sucursal'] if self.cfg['sucursal'] in dt.sucursales() else dt.sucursales()[0]
         self.generando = False
+        self.modo_backtesting = False
+        self.backtesting_corriendo = False
         self.paleta = None
         self.cola = queue.Queue()
         self._cola_ui = queue.Queue()
@@ -574,6 +581,11 @@ class PreveApp:
         self.btn_suc = Btn(top, f'{self.sucursal} ▾', None, 'secondary', 'md', min_width=130)
         self.btn_suc.set_command(self._menu_sucursal)
         self.btn_suc.pack(side='right', padx=S(6), pady=S(10))
+        self.btn_bt = tk.Label(top, text='⟲  Modo Backtesting', font=f(9, 'bold'), cursor='hand2', padx=S(12),
+                               pady=S(6), bg=SURFACE, fg=TEXT_DIM, highlightthickness=1,
+                               highlightbackground=BORDER)
+        self.btn_bt.pack(side='right', padx=S(6), pady=S(12))
+        self.btn_bt.bind('<Button-1>', lambda e: self.alternar_backtesting())
 
         cuerpo = tk.Frame(r, bg=BG)
         cuerpo.pack(fill='both', expand=True)
@@ -586,10 +598,10 @@ class PreveApp:
 
         self.nav = {}
         tk.Frame(self.side, bg=SURFACE, height=S(12)).pack()
+        self.sep_config = tk.Frame(self.side, bg=BORDER, height=1)
         for clave, texto, icono in NAV:
-            if clave == 'config':
-                tk.Frame(self.side, bg=BORDER, height=1).pack(fill='x', padx=S(16), pady=S(8))
             self.nav[clave] = self._item_nav(clave, texto, icono)
+        self._repintar_nav()
         self.ciclo_box = tk.Frame(self.side, bg=SURFACE)
         self.ciclo_box.pack(side='bottom', fill='x', padx=S(18), pady=S(18))
         self.actualizar_sidebar()
@@ -608,6 +620,41 @@ class PreveApp:
         badge.pack(side='right', padx=S(10))
         vs.bind_click(fila, lambda c=clave: self.ir(c))
         return dict(fila=fila, barra=barra, ic=ic, tx=tx, badge=badge)
+
+    def _repintar_nav(self):
+        """Muestra solo los ítems que corresponden al modo actual (normal o backtesting)."""
+        for w in list(self.nav.values()) + [None]:
+            (w['fila'] if w else self.sep_config).pack_forget()
+        for clave, _, _ in NAV:
+            oculto = (clave in OCULTAS_EN_BACKTESTING) if self.modo_backtesting else (clave in SOLO_EN_BACKTESTING)
+            if oculto:
+                continue
+            if clave == 'config':
+                self.sep_config.pack(fill='x', padx=S(16), pady=S(8), before=self.ciclo_box
+                                     if hasattr(self, 'ciclo_box') else None)
+            self.nav[clave]['fila'].pack(fill='x', padx=S(10), pady=S(1), before=self.ciclo_box
+                                         if hasattr(self, 'ciclo_box') else None)
+
+    def alternar_backtesting(self):
+        """Fase 6: activa/desactiva el modo backtesting (botón naranja de la barra superior)."""
+        if self.generando:
+            return
+        if self.modo_backtesting and self.backtesting_corriendo:
+            self.toast('Hay un backtesting en curso: cancélalo o espera a que termine.', 'warn')
+            return
+        self.modo_backtesting = not self.modo_backtesting
+        on = self.modo_backtesting
+        self.btn_bt.configure(bg=BRAND_ORANGE if on else SURFACE, fg='#FFFFFF' if on else TEXT_DIM,
+                              highlightbackground=BRAND_ORANGE if on else BORDER,
+                              text='⟲  Backtesting ACTIVO' if on else '⟲  Modo Backtesting')
+        self._repintar_nav()
+        if on:
+            self.ir('backtesting')
+        else:
+            # 6.5: lo calculado (ventas, pronósticos, métricas) queda en la base para el modo normal
+            self.recargar_datos()
+            self.ir('inicio')
+            self.toast('Modo normal. Los resultados del backtesting quedan guardados en la base.', 'info')
 
     def _marcar_nav(self, activo):
         for c, w in self.nav.items():
@@ -647,12 +694,22 @@ class PreveApp:
         if nombre not in self.vistas:
             clase = dict(inicio=vs.VistaInicio, generar=vs.VistaGenerar, recom=vs.VistaRecom,
                          decision=vs.VistaDecision, simular=vs.VistaSimular, historial=vs.VistaHistorial,
-                         config=vs.VistaConfig)[nombre]
+                         config=vs.VistaConfig, backtesting=self._clase_backtesting())[nombre]
             self.vistas[nombre] = clase(self.area, self)
         return self.vistas[nombre]
 
+    @staticmethod
+    def _clase_backtesting():
+        from preve_vista_backtesting import VistaBacktesting
+        return VistaBacktesting
+
     def ir(self, nombre, **kw):
         if self.generando:
+            return
+        if self.modo_backtesting and nombre in OCULTAS_EN_BACKTESTING:
+            self.toast('Esa sección está oculta en modo backtesting. Desactívalo para volver.', 'info')
+            return
+        if not self.modo_backtesting and nombre in SOLO_EN_BACKTESTING:
             return
         if self.vista_actual is not None:
             self.vista_actual.pack_forget()
@@ -928,6 +985,9 @@ class PreveApp:
         notificar_windows('PREVÉ — recomendación lista', resumen)
 
     def _cerrar(self):
+        if self.backtesting_corriendo and not messagebox.askyesno(
+                'PREVÉ', 'Hay un backtesting en marcha. Si cierras ahora se perderá.\n\n¿Cerrar de todos modos?'):
+            return
         if self.generando and not messagebox.askyesno(
                 'PREVÉ', 'El análisis sigue en marcha. Si cierras ahora se perderá el avance.\n\n¿Cerrar de todos modos?'):
             return
