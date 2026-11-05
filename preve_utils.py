@@ -11,13 +11,29 @@ def get_logger(nombre):
     return logging.getLogger(f'preve.{nombre}')
 
 
-def configurar_logging(nivel=logging.INFO):
-    """Configura la salida a consola una sola vez (la rotación a archivo llega en la Fase 7)."""
+LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+def configurar_logging(nivel=logging.INFO, carpeta=None):
+    """Consola + preve.log con rotación (5 MB × 3). Devuelve la ruta del archivo de log."""
+    import logging.handlers
+    import os
     global _CONFIGURADO
+    carpeta = carpeta or os.path.dirname(os.path.abspath(__file__))
+    ruta = os.path.join(carpeta, 'preve.log')
     if _CONFIGURADO:
-        return
-    logging.basicConfig(level=nivel, format='%(asctime)s %(levelname)-7s %(name)s: %(message)s')
+        return ruta
+    fmt = logging.Formatter('%(asctime)s %(levelname)-7s %(name)s: %(message)s')
+    raiz = logging.getLogger()
+    raiz.setLevel(nivel)
+    consola = logging.StreamHandler()
+    consola.setFormatter(fmt)
+    archivo = logging.handlers.RotatingFileHandler(ruta, maxBytes=LOG_MAX_BYTES, backupCount=3, encoding='utf-8')
+    archivo.setFormatter(fmt)
+    raiz.addHandler(consola)
+    raiz.addHandler(archivo)
     _CONFIGURADO = True
+    return ruta
 
 
 def safe_int(val, default=0):

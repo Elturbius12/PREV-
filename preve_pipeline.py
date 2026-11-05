@@ -520,7 +520,9 @@ def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_bc_
     fecha_inicio = min(neto['fecha'].min(), ventas_diarias['fecha'].min())
     fechas = pd.date_range(fecha_inicio, fecha_ancla, freq='D')
     tabla = neto.pivot(index='fecha', columns='sku', values='mov').reindex(fechas, fill_value=0)
-    tabla = tabla.reindex(columns=skus, fill_value=0)
+    # FIX (Fase 7): pivot() deja NaN en los días sin movimiento de cada SKU y reindex(fill_value=0) solo
+    # rellena filas/columnas NUEVAS; el NaN se propagaba hacia atrás y vaciaba el stock histórico
+    tabla = tabla.reindex(columns=skus, fill_value=0).fillna(0.0)
 
     anclaje = dim.set_index('sku')['stock_listado_actual'].reindex(skus).fillna(0)
     stock = pd.DataFrame(index=tabla.index, columns=skus, dtype=float)
