@@ -34,11 +34,13 @@ def descubrir_plugins():
 
 
 def listar_plugins():
+    """{clave: clase} de los plugins disponibles."""
     descubrir_plugins()
     return registro()
 
 
 def obtener_plugin(clave):
+    """Instancia del plugin con esa clave, o None."""
     if not clave:
         return None
     cls = listar_plugins().get(clave)

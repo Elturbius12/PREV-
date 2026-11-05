@@ -1,135 +1,130 @@
 # PREVÉ — Pronóstico de demanda y asistente de compras
 
-Aplicación de escritorio (Python + tkinter) que pronostica la demanda de cada producto de **Yuju Store** y le dice al comprador **qué comprar, cuánto y cuándo**, a partir de los reportes que exporta su ERP (Negosy).
-
-## El problema que resuelve
-
-Una tienda con miles de productos no puede decidir a ojo qué reponer. Comprar de menos genera quiebres de stock y ventas perdidas; comprar de más inmoviliza capital en productos que no rotan. Además, la demanda de un catálogo grande es muy heterogénea: hay productos que se venden todos los días, otros esporádicamente y otros recién lanzados sin historia. PREVÉ:
-
-- Reconstruye el stock diario histórico a partir de ventas, compras y movimientos de almacén.
-- Elige el modelo de pronóstico adecuado para cada producto.
-- Calcula el punto de reorden (ROP), la cantidad a comprar y la inversión necesaria.
-- Explica cada recomendación en lenguaje natural y registra la decisión del usuario.
+Aplicación de escritorio (Python + tkinter) que pronostica la demanda de cada producto y le dice al comprador **qué comprar, cuánto y cuándo**. Lo calcula a partir de los reportes del ERP (Negosy u otro sistema). Nació para Yuju Store y es configurable para cualquier empresa: sucursales, ciclos de compra, IGV, modelos y reglas.
 
 **Principio del proyecto:** nunca inventa un número. Si un dato falta, queda en blanco o pendiente.
 
-## Arquitectura híbrida de modelos
+## Qué hace
 
-Cada producto se segmenta con la clasificación de **Syntetos-Boylan** (ADI = intervalo medio entre demandas, CV² = coeficiente de variación al cuadrado de la demanda; umbral ADI = 1.32) y se asigna a un modelo:
+1. **Importa** los reportes del ERP (listado, ventas, compras, movimientos). Acepta Excel o CSV de cualquier sistema con mapeo de columnas, y descarga automática desde Negosy como plugin.
+2. **Reconstruye el stock diario** hacia atrás desde el stock del listado. Neutraliza los traslados entre almacenes de la misma sucursal y evita el doble descuento si el ERP registra ventas como salidas.
+3. **Segmenta** cada producto con ADI/CV² (Syntetos-Boylan) y le asigna un modelo:
 
-| Segmento | Modelo | Por qué |
-|---|---|---|
-| Alta rotación (demanda frecuente) | **LightGBM** | Aprovecha estacionalidad, tendencia y rezagos con árboles de gradiente. |
-| Productos nuevos / poca historia | **CatBoost** | Robusto con pocos datos y variables categóricas (categoría, subcategoría). |
-| Baja rotación / demanda intermitente | **Croston-TSB** | Modelo diseñado para series con muchos ceros (vía `statsforecast`). |
+| Segmento | Modelo |
+|---|---|
+| Demanda regular / alta rotación | **LightGBM** |
+| Producto nuevo (< 13 semanas) | **CatBoost** |
+| Demanda intermitente o sin historia | **Croston-TSB** |
 
-Los productos con pronóstico inestable se marcan para revisión manual. El nivel de servicio objetivo depende de la clase ABC: A = 95 %, B = 90 %, C = 85 %.
+4. **Calcula** el punto de reorden, el nivel objetivo y la cantidad a pedir, descontando el stock en tránsito de las órdenes abiertas.
+5. **Clasifica** cada producto con una plantilla de reglas: RECOMPRAR, MANTENER, LIQUIDAR, REDUCIR, PUBLICITAR, NEGOCIAR, DESCONTINUAR, REVISAR_COMPRA…
+6. **Valida** contra las ventas reales: un scorecard en cada análisis y un **modo backtesting** *walk-forward*.
 
-## Ciclos de compra
+### Fórmulas
 
-| Ciclo | Revisión | Lead time | Horizonte de cobertura |
+```
+stock de seguridad (SS) = z(clase ABC) · σ de la demanda del horizonte
+ROP                     = demanda durante el lead time + SS · √(lead time / horizonte)
+nivel objetivo          = demanda del horizonte + SS
+cantidad a pedir        = max(0, nivel objetivo − stock − stock en tránsito)
+```
+
+### Ciclos de compra (configurables, N ciclos)
+
+| Ciclo | Revisión | Lead time | Horizonte |
 |---|---|---|---|
-| **Internacional** | cada **105 días** | **36 días** | 141 días |
-| **Local** | cada **30 días** | **10 días** | 40 días |
+| Internacional (principal) | cada 105 días | 36 días | 141 días |
+| Local | cada 30 días | 10 días | 40 días |
 
-Dentro del ciclo internacional el usuario importa datos del ERP aproximadamente cada 14 días; las corridas de las primeras semanas se consideran preliminares y se aprueba la compra definitiva al acercarse la fecha límite.
+El ciclo de mayor horizonte es el principal: define las etiquetas PRELIMINAR / BORRADOR / FINAL y el reporte completo. Los demás generan sus notas de compra.
 
-## Categorías de acción
+## Instalación
 
-| Acción | Significado |
-|---|---|
-| **RECOMPRAR** | El stock está bajo el punto de reorden: comprar la cantidad sugerida. |
-| **REDUCIR** | Stock suficiente o holgado para el horizonte: no comprar por ahora. |
-| **LIQUIDAR** | Sin demanda proyectada o stock mayor a 3 veces la demanda: rematar. |
-| **PUBLICITAR** | Demanda declinante con buen margen: impulsar con promoción. |
-| **NEGOCIAR** | Alta rotación (clase A) con margen muy bajo: renegociar costo con el proveedor. |
-| **VIGILAR** | Producto nuevo o con poca historia: comprar lo mínimo y monitorear. |
+Requiere **Python 3.11+**. En Windows, marca «Add python.exe to PATH» al instalar.
 
-## Estructura del proyecto
+- **Windows:** doble clic en `INSTALAR.bat`.
+- **Linux / macOS:** `./instalar.sh`.
 
-| Archivo | Descripción |
-|---|---|
-| `preve_app.py` | Ventana principal tkinter: navegación, atajos, hilos de ejecución y notificaciones. |
-| `preve_ui.py` | Componentes visuales reutilizables (botones, tarjetas, sliders, tema, escalado DPI). |
-| `preve_vistas.py` | Pantallas: Inicio, Generar, Recomendaciones, Decisión rápida, Simular, Historial, Configuración. |
-| `preve_datos.py` | Capa de datos de la UI: configuración persistente, lectura de resultados, formato de números. |
-| `preve_pipeline.py` | Núcleo analítico: carga de reportes, reconstrucción de stock, segmentación, entrenamiento y recomendación. |
-| `preve_orquestador.py` | Ejecuta el pipeline completo y genera el Excel de resultados y el dashboard. |
-| `preve_ciclo.py` | Control de los ciclos de compra (105 días / lead time 36 días) y fechas límite. |
-| `preve_validacion.py` | Scorecard: compara pronósticos pasados con ventas reales (WMAPE, sesgo). |
-| `preve_historial.py` | Historial de ejecuciones y decisiones del usuario en SQLite. |
-| `preve_simulacion.py` | Simulador de escenarios («¿y si la demanda sube 20 %?», «¿y si el proveedor tarda más?»). |
-| `preve_informe.py` | Informes en Word y PDF con gráficos. |
-| `preve_extractor.py` | Bot Playwright que descarga los reportes Excel desde Negosy (solo exporta, nunca modifica). |
-| `dashboard_template.html` | Plantilla del dashboard HTML. |
-| `INSTALAR_Y_EJECUTAR.bat` / `instalar_y_ejecutar.sh` | Instalan dependencias y abren la app (Windows / Mac-Linux). |
-| `.env.example` | Plantilla de variables de entorno. |
+El instalador verifica la versión de Python, crea un entorno virtual `.venv`, instala `requirements.txt`, prepara la base `preve.db` (e importa la configuración y el historial de versiones anteriores sin duplicar) y abre la app.
 
-## Instalación y ejecución
-
-Requiere **Python 3.10+** (en Windows, marca «Add python.exe to PATH» al instalar).
+Instalación manual:
 
 ```bash
-git clone https://github.com/Elturbius12/PREV-.git
-cd PREV-
 python -m venv .venv
-.venv\Scripts\activate          # Linux/Mac: source .venv/bin/activate
+.venv\Scripts\activate            # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
+python scripts/migrar_a_sqlite.py # opcional: --con-ventas importa también las ventas de los Excel
 python preve_app.py
 ```
 
-O simplemente haz doble clic en `INSTALAR_Y_EJECUTAR.bat` (Windows) o `instalar_y_ejecutar.sh` (Mac/Linux).
+La primera vez se abre un **asistente de 6 pantallas**: empresa, sucursales y sus almacenes, ciclos de compra, frecuencia de análisis, columnas del Excel de ventas y plantilla de categorías. Todo se puede editar después en *Configuración*.
 
-Para usar el extractor automático de Negosy, instala además el navegador de Playwright una vez:
+### Credenciales del ERP (`.env`)
+
+Solo hacen falta para la descarga automática desde Negosy:
 
 ```bash
-playwright install chromium
-python preve_extractor.py --destino ./datos_negosy --tienda san_jose
-```
-
-### Reportes de entrada
-
-En la carpeta de entrada deben estar los reportes del ERP, sin renombrar:
-`listado_productos...xlsx`, `reporte_ventas_producto...xlsx` (puede haber varios periodos), `Reporte_compras_por_producto...xlsx` y `Reporte_productos_por_movimiento...xlsx`.
-Estos archivos contienen datos reales del negocio y **no se incluyen en el repositorio**.
-
-## Configuración del `.env`
-
-1. Copia `.env.example` a `.env`.
-2. Completa tus credenciales de Negosy:
-
-```env
+cp .env.example .env    # y completar
 NEGOSY_USUARIO=tu_usuario
 NEGOSY_CONTRASENA=tu_contrasena
 ```
 
-El `.env` está en `.gitignore` y nunca se sube. Las carpetas de trabajo por sucursal se guardan en `preve_config.json`, que se crea solo desde la pantalla *Configuración* y tampoco se versiona.
+El `.env` nunca se sube a git. La integración se activa en *Configuración → Integración con tu ERP*.
 
-## Estado del proyecto
+## Uso
 
-- ✅ **Fase 1:** carga de reportes, reconstrucción de stock y segmentación ADI/CV².
-- ✅ **Fase 2:** modelos híbridos (LightGBM, CatBoost, Croston-TSB), ROP y cantidad a comprar.
-- ✅ **Fase 3:** ciclos de compra, historial, validación (scorecard) y decisiones del usuario.
-- ✅ **Fase 4:** interfaz de escritorio, informes Word/PDF y extractor automático de Negosy.
-- ⏳ **Fase 5 (pendiente):** soporte multi-sucursal completo y simulación avanzada de escenarios.
+| Pantalla | Para qué |
+|---|---|
+| Inicio | Resumen: inversión pendiente, urgentes, ciclo, salud del inventario, comparación con el análisis anterior |
+| Generar | Carpetas de reportes, importar ventas desde un archivo, descargar desde el ERP y ejecutar el análisis |
+| Recomendaciones | Bandeja por producto: explicación, confianza y decisión (comprado / posponer / descartar) |
+| Decisión rápida | Las 20 compras de mayor impacto, una por una |
+| Simular | ¿Y si la demanda sube 20%? ¿Y si el proveedor tarda más? |
+| Historial | Análisis anteriores con la variación de inversión |
+| Configuración | Empresa, sucursales, ciclos, categorías de acción (con editor visual), ERP y parámetros del modelo |
+| **Modo Backtesting** | Botón naranja de la barra superior: valida el modelo contra el pasado y exporta un Excel |
 
-## Guía para colaboradores / otras IAs
+Atajos: `Ctrl+G` generar · `Ctrl+S` simular · `Ctrl+K` buscar · `Ctrl+H` historial · `Ctrl+R` recomendaciones · `Ctrl+D` decisión rápida · `Ctrl+I` inicio.
 
-Puntos del código que se pueden mejorar:
+**Stock en tránsito:** completa `ordenes_compra_abiertas.csv` (se crea vacío en la carpeta de resultados) con las órdenes emitidas y aún no recibidas.
 
-1. **Pruebas automáticas:** no hay tests. Empezar por `preve_pipeline.py` (`_clasificar_accion`, `reconstruir_stock`, segmentación) con datos sintéticos pequeños.
-2. **Datos de ejemplo:** falta una carpeta `sample_data/` con reportes sintéticos y anonimizados para poder probar la app sin datos reales.
-3. **Modularizar `preve_pipeline.py` y `preve_vistas.py`:** son archivos muy largos (≈35 KB y ≈55 KB); separar carga, stock, modelos y reglas de negocio.
-4. **Constantes duplicadas:** los ciclos (105/36 días) aparecen en `preve_pipeline.py` y `preve_ciclo.py`; centralizarlos en un único módulo de configuración.
-5. **Importaciones dentro de funciones** (`openpyxl`, `json`, `os` repetidos en `preve_orquestador.py`): moverlas al inicio y extraer una utilidad común de escritura de Excel.
-6. **Extractor Negosy:** los selectores y URLs están fijos en el código; moverlos a configuración y agregar reintentos ante cambios de la web. Hay imports sin usar (`re`, `Path`).
-7. **Rutas y sucursales:** `preve_config.json` guarda rutas absolutas; usar rutas relativas y completar el soporte multi-sucursal (Fase 5).
-8. **Entrenamiento:** no hay validación cruzada temporal ni búsqueda de hiperparámetros (LightGBM usa parámetros fijos); evaluar backtesting rolling por segmento.
-9. **Rendimiento:** el entrenamiento por producto es secuencial; paralelizar con `joblib` o entrenar modelos globales por segmento.
-10. **Empaquetado:** agregar `pyproject.toml`, versiones fijadas en `requirements.txt` y un ejecutable con PyInstaller.
-11. **Logging:** reemplazar `print`/callbacks por el módulo `logging` con niveles y archivo de log.
-12. **Internacionalización y tipado:** agregar type hints y separar textos de la UI.
+## Estructura
+
+| Módulo | Qué hace |
+|---|---|
+| `preve_app.py`, `preve_vistas.py`, `preve_ui.py` | Interfaz tkinter (ventana, vistas, componentes) |
+| `preve_wizard.py`, `preve_editor_plantillas.py`, `preve_importador_ui.py`, `preve_vista_backtesting.py` | Asistente inicial, editor de reglas, importación y backtesting en la UI |
+| `preve_pipeline.py` | Motor: lectura, SKU canónico, stock, segmentación, modelos y recomendación |
+| `preve_orquestador.py` | Corre el pipeline por ciclo y genera Excel, notas de compra, dashboard, validación e informe |
+| `preve_reglas.py`, `seeds/plantillas_categorias.py` | Motor de reglas (sin `eval`) y plantillas RETAIL, RETAIL_CLASICO, MANUFACTURA y DISTRIBUCION |
+| `preve_backtesting.py` | Backtesting walk-forward y simulación del día de reporte |
+| `preve_validacion.py` | Scorecard (WMAPE), contrafactual y ROI |
+| `preve_simulacion.py` | Escenarios *what-if* |
+| `preve_importador.py` | Importación flexible de ventas (xlsx/csv/tsv) con validación por fila |
+| `preve_config.py` | Configuración con caché y validación de tipos |
+| `database.py` | Capa de datos (SQLAlchemy Core): único lugar con SQL; SQLite por defecto, PostgreSQL con `PREVE_DB_URL` |
+| `preve_historial.py`, `preve_ciclo.py`, `preve_datos.py` | Historial, ciclo de compras y capa de datos de la UI |
+| `preve_informe.py` | Informe para gerencia (Word y PDF) |
+| `plugins/` | Integraciones con ERP (`PluginERP`), por ahora `negosy` |
+| `scripts/migrar_a_sqlite.py` | Migración de los archivos de versiones anteriores a `preve.db` |
+| `tests/` | 182 tests (pytest) |
+
+Detalle técnico en [ARQUITECTURA.md](ARQUITECTURA.md), guía para contribuir en [CONTRIBUTING.md](CONTRIBUTING.md), cambios por fase en [CHANGELOG.md](CHANGELOG.md) y el estado del proyecto en [REPORTE_FINAL.md](REPORTE_FINAL.md).
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest                                          # 182 tests
+pytest --cov=preve_pipeline --cov=database --cov=preve_validacion --cov=preve_backtesting
+```
+
+Cada test usa una base temporal propia y datos sintéticos: nunca toca `preve.db` ni reportes reales.
+
+## Logs
+
+`preve.log` en la carpeta de la app (rota cada 5 MB y guarda 3 archivos). El detalle técnico de cualquier error queda ahí.
 
 ## Licencia
 
-Proyecto personal/académico de Yuju Store. Pendiente de definir licencia.
+Proyecto de Yuju Store. Licencia pendiente de definir.

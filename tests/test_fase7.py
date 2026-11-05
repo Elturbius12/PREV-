@@ -108,7 +108,6 @@ def test_cargar_datos_falta_un_tipo_de_reporte(tmp_path, log):
         cargar_datos(str(tmp_path), log)
 
 
-@pytest.mark.xfail(reason="Fase 7 pendiente: KeyError del SKU en la segmentación con este Excel sintético", strict=False)
 def test_pipeline_de_punta_a_punta_con_los_tres_modelos(carpeta_erp, log):
     import preve_pipeline as pp
     carpeta, _ = carpeta_erp
@@ -129,7 +128,10 @@ def test_pipeline_de_punta_a_punta_con_los_tres_modelos(carpeta_erp, log):
     assert (pron['demanda_p50_141d'] <= pron['demanda_p90_141d']).all()
     rec = pp.calcular_recomendacion(pron, seg, dim, stock, panel, fecha_fin, log, compras_raw=compras,
                                     mapa_bc_a_sku=mapas[0])
-    prov = rec.set_index('sku')['proveedor_principal']
+    # con 1 solo producto regular LightGBM no llega a 50 filas de entrenamiento: no se inventa pronóstico
+    assert '7750001' in set(sin['sku']) and '7750001' not in set(rec['sku'])
+    assert set(rec['sku']) == set(pron['sku'])
+    prov = pp.extraer_proveedor_principal(compras, mapas[0]).set_index('sku')['proveedor_principal']
     assert prov['7750001'] == 'PROVEEDOR UNO'                        # el que más unidades vendió
     assert {'accion', 'motivo_accion', 'decision', 'rop', 'nivel_objetivo'} <= set(rec.columns)
 

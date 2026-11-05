@@ -107,6 +107,7 @@ def acciones(p):
 
 
 def describir_condicion(c):
+    """Condición en texto, p. ej. "stock_dias > 90"."""
     v = c['valor']
     if isinstance(v, dict):
         f = v.get('factor', 1)
@@ -117,6 +118,7 @@ def describir_condicion(c):
 
 
 def describir_regla(r):
+    """Regla en texto: sus condiciones unidas con "y"."""
     return ' y '.join(describir_condicion(c) for c in r['condiciones'])
 
 
@@ -231,6 +233,7 @@ def cargar_plantilla(nombre, db=None):
 
 
 def guardar_plantilla(p, db=None, es_sistema=False):
+    """Valida y guarda la plantilla en la base."""
     from database import Database
     validar_plantilla(p)
     db = db or Database.default()
@@ -240,4 +243,5 @@ def guardar_plantilla(p, db=None, es_sistema=False):
 
 
 def copiar(p):
+    """Copia profunda de una plantilla (para editarla sin tocar la original)."""
     return json.loads(json.dumps(p))

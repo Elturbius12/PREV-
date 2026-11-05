@@ -396,12 +396,14 @@ class Database:
 
     @classmethod
     def cerrar_todas(cls):
+        """Libera las conexiones de todas las instancias compartidas (tests y cierre de la app)."""
         for db in cls._instancias.values():
             db.engine.dispose()
         cls._instancias.clear()
 
     # ── migraciones ────────────────────────────────────────
     def version_esquema(self):
+        """Versión de esquema aplicada (0 si la base está vacía)."""
         with self.engine.connect() as conn:
             if not self.engine.dialect.has_table(conn, 'schema_version'):
                 return 0
@@ -444,6 +446,7 @@ class Database:
 
     # ── configuración clave/valor ──────────────────────────
     def set_config(self, clave, valor, tipo=None, descripcion=None):
+        """Guarda clave/valor en `configuracion`; el tipo se infiere del valor si no se indica."""
         tipo = tipo or ('bool' if isinstance(valor, bool) else 'int' if isinstance(valor, int)
                         else 'float' if isinstance(valor, float) else 'json' if isinstance(valor, (dict, list))
                         else 'string')
@@ -456,6 +459,7 @@ class Database:
             self._upsert(conn, configuracion, [fila], ['clave'], [k for k in fila if k != 'clave'])
 
     def get_config(self, clave, defecto=None):
+        """Valor de la clave ya convertido a su tipo, o `defecto` si no existe."""
         with self.engine.connect() as conn:
             f = conn.execute(select(configuracion.c.valor, configuracion.c.tipo)
                              .where(configuracion.c.clave == clave)).first()
@@ -464,6 +468,7 @@ class Database:
         return _convertir_config(f.valor, f.tipo)
 
     def listar_config(self, prefijo=''):
+        """{clave: valor} de todas las claves que empiezan con `prefijo`."""
         with self.engine.connect() as conn:
             filas = conn.execute(select(configuracion).where(configuracion.c.clave.like(f'{prefijo}%'))
                                  .order_by(configuracion.c.clave)).all()
@@ -471,6 +476,7 @@ class Database:
 
     # ── empresas / sucursales ──────────────────────────────
     def obtener_o_crear_empresa(self, nombre=EMPRESA_DEFECTO, moneda='PEN', igv_factor=1.18):
+        """id de la empresa con ese nombre; la crea si no existe."""
         with self.engine.begin() as conn:
             fid = conn.execute(select(empresas.c.id).where(empresas.c.nombre == nombre)).scalar()
             if fid is None:
@@ -479,12 +485,14 @@ class Database:
         return fid
 
     def obtener_empresa(self, empresa_id=None):
+        """Fila de la empresa como dict (la por defecto si no se indica id)."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         with self.engine.connect() as conn:
             f = conn.execute(select(empresas).where(empresas.c.id == empresa_id)).first()
         return dict(f._mapping) if f else None
 
     def actualizar_empresa(self, nombre=None, moneda=None, igv_factor=None, empresa_id=None):
+        """Cambia nombre, moneda y/o IGV de la empresa (solo los valores no None)."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         valores = {k: v for k, v in (('nombre', nombre), ('moneda', moneda), ('igv_factor', igv_factor))
                    if v is not None}
@@ -493,6 +501,7 @@ class Database:
                 conn.execute(update(empresas).where(empresas.c.id == empresa_id).values(**valores))
 
     def actualizar_sucursal(self, codigo, nombre=None, activa=None, empresa_id=None):
+        """Cambia nombre y/o estado activo de una sucursal identificada por su código."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         valores = {k: v for k, v in (('nombre', nombre), ('activa', activa)) if v is not None}
         if valores:
@@ -515,6 +524,7 @@ class Database:
         return fid if fid is not None else self.obtener_o_crear_empresa()
 
     def obtener_o_crear_sucursal(self, nombre, empresa_id=None, codigo=None):
+        """id de la sucursal (código = slug del nombre); la crea si no existe."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         codigo = codigo or slug(nombre)
         with self.engine.begin() as conn:
@@ -526,6 +536,7 @@ class Database:
         return sid
 
     def listar_sucursales(self, empresa_id=None, solo_activas=True):
+        """DataFrame de sucursales de la empresa (solo activas por defecto)."""
         q = select(sucursales)
         if empresa_id:
             q = q.where(sucursales.c.empresa_id == empresa_id)
@@ -556,6 +567,7 @@ class Database:
         return self.mapa_productos(empresa_id)
 
     def mapa_productos(self, empresa_id=None):
+        """{sku: producto_id} de la empresa."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         with self.engine.connect() as conn:
             filas = conn.execute(select(productos.c.sku, productos.c.id)
@@ -570,10 +582,12 @@ class Database:
         return self.guardar_productos(pd.DataFrame({'sku': [str(sku)]}), empresa_id)[str(sku)]
 
     def obtener_productos(self, empresa_id=None):
+        """DataFrame con el catálogo de productos de la empresa."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         return self._df(select(productos).where(productos.c.empresa_id == empresa_id).order_by(productos.c.sku))
 
     def obtener_o_crear_proveedor(self, nombre, empresa_id=None, tipo=None, lead_time_dias=None):
+        """id del proveedor con ese nombre; lo crea si no existe."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         with self.engine.begin() as conn:
             pid = conn.execute(select(proveedores.c.id).where(proveedores.c.empresa_id == empresa_id,
@@ -585,6 +599,7 @@ class Database:
         return pid
 
     def listar_proveedores(self, empresa_id=None):
+        """DataFrame de proveedores de la empresa."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         return self._df(select(proveedores).where(proveedores.c.empresa_id == empresa_id)
                         .order_by(proveedores.c.nombre))
@@ -592,6 +607,7 @@ class Database:
     # ── ciclos de compra ───────────────────────────────────
     def guardar_ciclo_compra(self, nombre, duracion_dias, lead_time_dias, horizonte_pronostico_dias=None,
                              dia_reporte_final=None, activo=True, empresa_id=None):
+        """Crea o actualiza un ciclo de compra por nombre (horizonte = duración + lead time si falta)."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         fila = {'empresa_id': empresa_id, 'nombre': nombre, 'duracion_dias': int(duracion_dias),
                 'lead_time_dias': int(lead_time_dias),
@@ -603,6 +619,7 @@ class Database:
                          [k for k in fila if k not in ('empresa_id', 'nombre')])
 
     def listar_ciclos_compra(self, empresa_id=None, solo_activos=True):
+        """DataFrame de ciclos de compra (solo activos por defecto)."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         q = select(ciclos_compra).where(ciclos_compra.c.empresa_id == empresa_id)
         if solo_activos:
@@ -668,6 +685,7 @@ class Database:
         return len(filas)
 
     def obtener_stock_actual(self, sucursal):
+        """DataFrame sku / cantidad / fecha_actualizacion de la sucursal."""
         q = (select(productos.c.sku, stock_actual.c.cantidad, stock_actual.c.fecha_actualizacion)
              .join(productos, productos.c.id == stock_actual.c.producto_id)
              .join(sucursales, sucursales.c.id == stock_actual.c.sucursal_id)
@@ -677,6 +695,7 @@ class Database:
     # ── órdenes de compra abiertas ─────────────────────────
     def guardar_orden_compra(self, sku, cantidad, proveedor=None, fecha_pedido=None, fecha_estimada_llegada=None,
                              estado='abierta', sucursal=None, empresa_id=None):
+        """Registra una orden de compra (abierta por defecto). Devuelve su id."""
         pid = self._id_producto(sku, empresa_id)
         prov_id = self.obtener_o_crear_proveedor(proveedor, empresa_id) if proveedor else None
         sid = self.obtener_o_crear_sucursal(sucursal, empresa_id) if sucursal else None
@@ -687,6 +706,7 @@ class Database:
                 estado=estado)).inserted_primary_key[0]
 
     def obtener_ordenes_compra(self, estado=None):
+        """DataFrame de órdenes de compra, opcionalmente filtradas por estado."""
         q = (select(ordenes_compra_abiertas.c.id, productos.c.sku, ordenes_compra_abiertas.c.cantidad,
                     proveedores.c.nombre.label('proveedor'), sucursales.c.nombre.label('sucursal'),
                     ordenes_compra_abiertas.c.fecha_pedido, ordenes_compra_abiertas.c.fecha_estimada_llegada,
@@ -737,6 +757,7 @@ class Database:
         return len(filas)
 
     def obtener_pronosticos(self, sucursal=None, desde=None, hasta=None, skus=None):
+        """Pronósticos guardados con sku y sucursal, filtrables por período y SKUs."""
         q = (select(pronosticos, productos.c.sku, sucursales.c.nombre.label('sucursal'))
              .join(productos, productos.c.id == pronosticos.c.producto_id)
              .join(sucursales, sucursales.c.id == pronosticos.c.sucursal_id))
@@ -769,6 +790,7 @@ class Database:
         return len(filas)
 
     def obtener_metricas(self, modelo=None):
+        """Filas de metricas_periodo (opcionalmente de un modelo) con el sku de cada una."""
         q = select(metricas_periodo, productos.c.sku).outerjoin(productos, productos.c.id == metricas_periodo.c.producto_id)
         if modelo:
             q = q.where(metricas_periodo.c.modelo == modelo)
@@ -776,6 +798,7 @@ class Database:
 
     def guardar_ejecucion_backtesting(self, fecha_inicio, fecha_fin, total_productos=None, total_periodos=None,
                                       mape_promedio=None, ruta_excel=None, configuracion=None, empresa_id=None):
+        """Registra una corrida de backtesting. Devuelve su id."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         with self.engine.begin() as conn:
             return conn.execute(insert(ejecuciones_backtesting).values(
@@ -786,10 +809,12 @@ class Database:
             )).inserted_primary_key[0]
 
     def listar_ejecuciones_backtesting(self):
+        """Corridas de backtesting, la más reciente primero."""
         return self._df(select(ejecuciones_backtesting).order_by(ejecuciones_backtesting.c.id.desc()))
 
     # ── plantillas y categorías ────────────────────────────
     def guardar_plantilla_categorias(self, nombre, reglas, descripcion='', es_plantilla_sistema=False):
+        """Crea o reemplaza una plantilla de categorías (por nombre)."""
         fila = {'nombre': nombre, 'descripcion': descripcion,
                 'reglas_json': json.dumps(reglas, ensure_ascii=False), 'es_plantilla_sistema': bool(es_plantilla_sistema)}
         with self.engine.begin() as conn:
@@ -797,6 +822,7 @@ class Database:
                          ['descripcion', 'reglas_json', 'es_plantilla_sistema'])
 
     def listar_plantillas_categorias(self):
+        """DataFrame de plantillas; la columna `reglas` trae el JSON decodificado."""
         df = self._df(select(plantillas_categorias).order_by(plantillas_categorias.c.id))
         if not df.empty:
             df['reglas'] = df['reglas_json'].map(json.loads)
@@ -815,12 +841,14 @@ class Database:
                     for i, c in enumerate(categorias)])
 
     def listar_categorias_activas(self, empresa_id=None):
+        """Categorías activas de la empresa, en su orden."""
         empresa_id = empresa_id or self.empresa_por_defecto()
         return self._df(select(categorias_activas).where(categorias_activas.c.empresa_id == empresa_id)
                         .order_by(categorias_activas.c.orden))
 
     # ── perfiles de importación ────────────────────────────
     def guardar_perfil_importacion(self, nombre, mapeo_columnas, formato_fecha=None, separador=None, tipo='ventas'):
+        """Crea o reemplaza un perfil de importación (mapeo de columnas + formato de fecha)."""
         fila = {'nombre': nombre.strip(), 'tipo': tipo, 'mapeo_columnas': json.dumps(mapeo_columnas, ensure_ascii=False),
                 'formato_fecha': formato_fecha, 'separador': separador, 'creado_en': _ahora()}
         with self.engine.begin() as conn:
@@ -828,6 +856,7 @@ class Database:
                          ['tipo', 'mapeo_columnas', 'formato_fecha', 'separador'])
 
     def listar_perfiles_importacion(self, tipo=None):
+        """DataFrame de perfiles; la columna `mapeo` trae el dict decodificado."""
         q = select(perfiles_importacion)
         if tipo:
             q = q.where(perfiles_importacion.c.tipo == tipo)
@@ -837,6 +866,7 @@ class Database:
         return df
 
     def obtener_perfil_importacion(self, nombre):
+        """Perfil como dict (con `mapeo` decodificado), o None."""
         with self.engine.connect() as conn:
             f = conn.execute(select(perfiles_importacion).where(perfiles_importacion.c.nombre == nombre)).first()
         if not f:
@@ -846,6 +876,7 @@ class Database:
         return d
 
     def eliminar_perfil_importacion(self, nombre):
+        """Borra el perfil con ese nombre (si existe)."""
         with self.engine.begin() as conn:
             conn.execute(delete(perfiles_importacion).where(perfiles_importacion.c.nombre == nombre))
 
@@ -862,6 +893,7 @@ class Database:
     # ── decisiones de compra ───────────────────────────────
     def guardar_decision(self, sku, sucursal, ciclo_numero, estado, razon='', hasta=None, accion=None,
                          cantidad_sugerida=None, cantidad_aprobada=None, usuario=None, fecha=None):
+        """Guarda (o reemplaza) la decisión del usuario sobre un producto en un ciclo y sucursal."""
         fila = {'producto_id': self._id_producto(sku), 'sucursal_id': self.obtener_o_crear_sucursal(sucursal),
                 'ciclo_numero': int(ciclo_numero), 'estado': estado, 'razon': _texto(razon) or '',
                 'hasta': _a_fecha(hasta),
@@ -873,6 +905,7 @@ class Database:
                          [k for k in fila if k not in ('producto_id', 'sucursal_id', 'ciclo_numero')])
 
     def borrar_decision(self, sku, sucursal, ciclo_numero):
+        """Elimina la decisión del producto en ese ciclo y sucursal (deshacer)."""
         pid = self.mapa_productos().get(str(sku))
         if pid is None:
             return
@@ -896,6 +929,7 @@ class Database:
                         'fecha': f.fecha.isoformat() if f.fecha else None} for f in filas}
 
     def contar_decisiones(self):
+        """Cantidad total de decisiones guardadas."""
         with self.engine.connect() as conn:
             return conn.execute(select(func.count()).select_from(decisiones_compra)).scalar()
 
@@ -958,6 +992,7 @@ class Database:
                 .join(sucursales, sucursales.c.id == ejecuciones.c.sucursal_id))
 
     def consultar_ejecuciones(self, sucursal=None, limite=10, asc=False):
+        """Ejecuciones del pipeline con nombre de sucursal (la más reciente primero salvo asc=True)."""
         q = self._q_ejecuciones()
         if sucursal:
             q = q.where(sucursales.c.codigo == slug(sucursal))
@@ -976,6 +1011,7 @@ class Database:
                                      .where(recomendaciones.c.ejecucion_id == ejecucion_id)).all())
 
     def recomendaciones_de_sku(self, sku, limite=5):
+        """Historial de recomendaciones de un SKU, la más reciente primero."""
         q = (select(recomendaciones, ejecuciones.c.fecha, sucursales.c.nombre.label('sucursal'),
                     ejecuciones.c.etiqueta, ejecuciones.c.ciclo_numero)
              .join(ejecuciones, ejecuciones.c.id == recomendaciones.c.ejecucion_id)
@@ -984,6 +1020,7 @@ class Database:
         return self._df(q)
 
     def evolucion_metricas(self, sucursal=None):
+        """Ejecuciones con sus métricas de validación (si las hubo), en orden cronológico."""
         q = (select(ejecuciones.c.id, ejecuciones.c.fecha, sucursales.c.nombre.label('sucursal'),
                     ejecuciones.c.etiqueta, ejecuciones.c.ciclo_numero, ejecuciones.c.skus_evaluados,
                     ejecuciones.c.inversion_total, metricas_ejecucion.c.wmape, metricas_ejecucion.c.calificacion,
@@ -995,6 +1032,7 @@ class Database:
         return self._df(q.order_by(ejecuciones.c.id))
 
     def ultimo_scorecard(self, sucursal=None):
+        """WMAPE y calificación de la última validación real (de la sucursal si se indica), o None."""
         q = (select(metricas_ejecucion.c.wmape, metricas_ejecucion.c.calificacion)
              .join(ejecuciones, ejecuciones.c.id == metricas_ejecucion.c.ejecucion_id)
              .join(sucursales, sucursales.c.id == ejecuciones.c.sucursal_id)
@@ -1028,16 +1066,19 @@ class Database:
                 for f in filas]
 
     def hay_ejecuciones(self):
+        """True si el historial tiene al menos una ejecución."""
         with self.engine.connect() as conn:
             return (conn.execute(select(func.count()).select_from(ejecuciones)).scalar() or 0) > 0
 
     # ── conteos (validación de migraciones) ────────────────
     def contar(self, nombre_tabla):
+        """Cantidad de filas de una tabla del esquema."""
         tabla = metadata.tables[nombre_tabla]
         with self.engine.connect() as conn:
             return conn.execute(select(func.count()).select_from(tabla)).scalar()
 
     def conteos(self):
+        """{tabla: filas} de todas las tablas (para validar migraciones)."""
         return {t: self.contar(t) for t in metadata.tables if t != 'schema_version'}
 
     # ── historial antiguo (preve_historial.db por carpeta) ─

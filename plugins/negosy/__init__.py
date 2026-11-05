@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Plugin de Negosy ERP: descarga los 5 reportes por tienda con Playwright (ver extractor.py)."""
 from plugins.base import PluginERP, registrar
+from preve_utils import log_info
 
 
 @registrar
@@ -12,10 +13,12 @@ class NegosyPlugin(PluginERP):
     variables_credenciales = {'usuario': 'NEGOSY_USUARIO', 'contrasena': 'NEGOSY_CONTRASENA'}
 
     def opciones_disponibles(self):
+        """Tiendas de Negosy que se pueden descargar."""
         from plugins.negosy.extractor import TIENDAS
         return {'tiendas': list(TIENDAS)}
 
-    def extraer(self, carpeta_destino, opciones=None, log=print):
+    def extraer(self, carpeta_destino, opciones=None, log=log_info):
+        """Descarga los 5 reportes de las tiendas elegidas a una subcarpeta con fecha y la devuelve."""
         from plugins.negosy.extractor import carpeta_descarga, extraer_datos
         cred = self.credenciales()
         if not all(cred.values()):

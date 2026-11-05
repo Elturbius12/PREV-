@@ -11,10 +11,12 @@ actuales no traen.
 
 
 def c(variable, operador, valor):
+    """Condición {variable, operador, valor}."""
     return {'variable': variable, 'operador': operador, 'valor': valor}
 
 
 def var(variable, factor=1):
+    """Valor de condición que compara contra otra variable × factor."""
     return {'variable': variable, 'factor': factor}
 
 

@@ -18,27 +18,25 @@ Endpoints mapeados (5 por tienda):
 
 Uso:
     from preve_extractor import extraer_datos
-    extraer_datos(carpeta_destino, config, progreso=print)
+    extraer_datos(carpeta_destino, config, progreso=log_info)
 
     O desde consola:
     python -m plugins.negosy.extractor --destino ./datos_negosy --tienda san_jose
 """
 
 import os
-import re
 import json
 import time
 import asyncio
 import argparse
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import sys
 
 if __package__ in (None, ''):          # ejecutado como script: que encuentre los módulos de la app
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from preve_utils import get_logger  # noqa: E402
+from preve_utils import get_logger, log_info  # noqa: E402
 
 try:
     from dotenv import load_dotenv
@@ -250,7 +248,7 @@ async def _descargar_sincrono(page, url, destino, nombre_archivo, log):
         size_kb = os.path.getsize(ruta_final) / 1024
         log(f'  ✓ {nombre_archivo} descargado ({size_kb:.0f} KB)')
         return ruta_final
-    except Exception as e:
+    except Exception:
         # Plan B: tal vez la respuesta es directa (no dispara download event)
         log(f'  Reintentando descarga directa de {nombre_archivo}...')
         try:
@@ -521,7 +519,7 @@ async def _extraer_tienda(page, tienda_key, base_url, carpeta_destino,
 # ---------------------------------------------------------------------------
 async def extraer_datos_async(carpeta_destino, usuario, contrasena,
                                tiendas=None, fecha_inicio=None, fecha_fin=None,
-                               headless=True, log=print, crear_subcarpeta=True):
+                               headless=True, log=log_info, crear_subcarpeta=True):
     """Extrae datos de Negosy para las tiendas especificadas.
 
     Args:
@@ -575,7 +573,7 @@ async def extraer_datos_async(carpeta_destino, usuario, contrasena,
                     log(f'⚠ Tienda "{tienda_key}" no reconocida, se omite.')
                     continue
 
-                base_url = await _seleccionar_tienda(page, tienda_key, log)
+                await _seleccionar_tienda(page, tienda_key, log)
                 archivos = await _extraer_tienda(
                     page, tienda_key, TIENDAS[tienda_key]['base_url'],
                     carpeta_destino, fecha_inicio, fecha_fin, log)
@@ -643,6 +641,7 @@ def guardar_config(config):
 # CLI
 # ---------------------------------------------------------------------------
 def main():
+    """Uso por consola: descarga los reportes con las credenciales del .env o de los argumentos."""
     parser = argparse.ArgumentParser(
         description='PREVÉ Extractor — Descarga automática de reportes de Negosy ERP')
     parser.add_argument('--destino', '-d', default='./datos_negosy',

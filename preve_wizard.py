@@ -33,6 +33,7 @@ CAMPOS_VENTAS = [('fecha', 'Fecha de la venta', True), ('codigo_barras', 'Códig
 # ══════════════════════════════════════════════════════════════════
 def asegurar_plantillas(cfg):
     # Fase 5: las plantillas del sistema viven en seeds/plantillas_categorias.py
+    """Siembra las plantillas del sistema si faltan."""
     from seeds.plantillas_categorias import sembrar
     sembrar(cfg.db)
 

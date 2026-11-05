@@ -83,6 +83,7 @@ class ConfigError(ValueError):
 
 
 def validar_tipo(clave, valor, tipo):
+    """Valida y normaliza un valor según su tipo declarado; lanza ConfigError si no corresponde."""
     if valor is None:
         if DEFAULTS.get(clave, (0,))[0] is None:
             return valor
@@ -121,6 +122,7 @@ class ParametrosModelo:
 
     @property
     def horizonte_semanas(self):
+        """Horizonte expresado en semanas."""
         return self.horizonte_dias / 7.0
 
 
@@ -144,10 +146,12 @@ class Config:
 
     @classmethod
     def reiniciar(cls):
+        """Descarta la instancia compartida (se recrea en el próximo Config.actual())."""
         cls._actual = None
 
     # ── carga / caché ──────────────────────────────────────
     def invalidar(self):
+        """Vacía la caché: la próxima lectura vuelve a la base."""
         self._cache = None
 
     def _datos(self):
@@ -211,12 +215,14 @@ class Config:
 
     # ── valores simples ────────────────────────────────────
     def get(self, clave, defecto=None):
+        """Valor de la clave (o su valor por defecto documentado en DEFAULTS)."""
         v = self._datos()['valores'].get(clave)
         if v is None:
             return DEFAULTS[clave][0] if clave in DEFAULTS and defecto is None else defecto
         return v
 
     def set(self, clave, valor):
+        """Valida el tipo, guarda en la base e invalida la caché."""
         if clave in DEFAULTS:
             _, tipo, desc = DEFAULTS[clave]
             valor = validar_tipo(clave, valor, tipo)
@@ -228,11 +234,13 @@ class Config:
     # ── empresa ────────────────────────────────────────────
     @property
     def empresa(self):
+        """Nombre, moneda e IGV de la empresa."""
         e = self._datos()['empresa'] or {}
         return {'nombre': e.get('nombre', EMPRESA_DEFECTO['nombre']), 'moneda': e.get('moneda', 'PEN'),
                 'igv_factor': float(e.get('igv_factor') or 1.18)}
 
     def set_empresa(self, nombre, moneda, igv_factor):
+        """Actualiza los datos de la empresa (valida nombre e IGV)."""
         if not str(nombre).strip():
             raise ConfigError('El nombre de la empresa no puede quedar vacío')
         igv = float(igv_factor)
@@ -257,9 +265,11 @@ class Config:
 
     @property
     def nombres_sucursales(self):
+        """Nombres de las sucursales activas."""
         return [s['nombre'] for s in self.sucursales if s['activa']]
 
     def sucursal(self, nombre):
+        """Datos de una sucursal por nombre (insensible a mayúsculas y tildes), o None."""
         cod = slug(nombre)
         return next((s for s in self.sucursales if s['codigo'] == cod), None)
 
@@ -282,10 +292,12 @@ class Config:
         self.invalidar()
 
     def carpetas(self, sucursal):
+        """Carpetas de entrada y salida de una sucursal."""
         s = self.sucursal(sucursal)
         return {'entrada': s['entrada'], 'salida': s['salida']} if s else {'entrada': '', 'salida': ''}
 
     def set_carpeta(self, sucursal, clave, ruta):
+        """Cambia la carpeta de entrada o salida de una sucursal."""
         cod = slug(sucursal)
         actual = dict(self.carpetas(sucursal))
         actual[clave] = ruta
@@ -301,6 +313,7 @@ class Config:
 
     @property
     def ciclo_principal(self):
+        """Ciclo de mayor horizonte (define las etiquetas y el reporte principal)."""
         return self.ciclos[0] if self.ciclos else dict(CICLOS_DEFECTO[0], activo=True)
 
     def guardar_ciclos(self, lista):
@@ -362,6 +375,7 @@ class Config:
 
     # ── parámetros del pipeline ────────────────────────────
     def parametros_modelo(self, sucursal=None, ciclo=None):
+        """ParametrosModelo para el pipeline (horizonte y lead time del ciclo, almacenes de la sucursal)."""
         ciclo = ciclo or self.ciclo_principal
         suc = self.sucursal(sucursal) if sucursal else None
         almacenes = frozenset(normalizar_ubicacion(a) for a in (suc['almacenes'] if suc else []))

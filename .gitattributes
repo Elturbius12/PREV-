@@ -1,0 +1,5 @@
+# Los scripts de shell deben tener fin de línea LF (con CRLF fallan en Linux/macOS)
+*.sh  text eol=lf
+*.bat text eol=crlf
+*.py  text
+*.md  text

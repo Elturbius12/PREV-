@@ -20,7 +20,7 @@ import pandas as pd
 import preve_datos as dt
 from preve_datos import fmt_num, fmt_soles, fecha_larga
 # FIX: safe_int en vez de int() donde el valor puede ser NaN (antes ValueError abortaba el informe)
-from preve_utils import safe_int, get_logger
+from preve_utils import safe_int, get_logger, log_info
 
 logger = get_logger('informe')
 
@@ -634,7 +634,7 @@ def _escribir_pdf(meta, B, ruta):
 # ══════════════════════════════════════════════════════════════════
 # 4) API
 # ══════════════════════════════════════════════════════════════════
-def generar_informe(carpeta_salida, sucursal='San José', formatos=('docx', 'pdf'), log=print):
+def generar_informe(carpeta_salida, sucursal='San José', formatos=('docx', 'pdf'), log=log_info):
     """Genera el informe y devuelve {'docx': ruta, 'pdf': ruta} con lo que se pudo escribir."""
     tmp = tempfile.mkdtemp(prefix='preve_informe_')
     resultado = {}

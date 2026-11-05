@@ -25,7 +25,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from preve_utils import get_logger
+from preve_utils import get_logger, log_info
 
 logger = get_logger('backtesting')
 
@@ -52,11 +52,13 @@ class DatosBacktest:
 
     @property
     def primera_venta(self):
+        """Fecha de la primera venta de cada SKU."""
         v = self.ventas_diarias[self.ventas_diarias['mov'] < 0]
         return v.groupby('sku')['fecha'].min()
 
     @property
     def ultima_fecha(self):
+        """Última fecha con ventas registradas."""
         return pd.Timestamp(self.ventas_diarias['fecha'].max()).normalize()
 
     @classmethod
@@ -127,7 +129,7 @@ def resumir(df):
 # ══════════════════════════════════════════════════════════════════
 class Backtester:
     def __init__(self, datos, params=None, plantilla=None, ventana_dias=None, sucursal='San José', ciclo=None,
-                 inicio_ciclo=None, pronosticador=None, db=None, carpeta_salida=None, log=print,
+                 inicio_ciclo=None, pronosticador=None, db=None, carpeta_salida=None, log=log_info,
                  progreso=None, cancelar=None):
         from preve_config import Config, ParametrosModelo
         conf = Config.actual()
@@ -146,6 +148,7 @@ class Backtester:
 
     @property
     def db(self):
+        """Base de datos (la por defecto si no se pasó una)."""
         if self._db is None:
             from database import Database
             self._db = Database.default()
@@ -185,6 +188,7 @@ class Backtester:
 
     # ── evaluación de una ventana ──────────────────────────
     def evaluar_ventana(self, t, fin):
+        """Entrena con datos anteriores a `t`, pronostica [t, fin) y compara con lo vendido."""
         ventas_hasta, stock_hasta = self.datos.hasta(t)
         pron, _, seg, _ = self.pronosticador(ventas_hasta, stock_hasta, self.datos.dim, self.ventana_dias,
                                              self.params, self._silencio)
@@ -225,6 +229,7 @@ class Backtester:
         return dias
 
     def simular_compra(self, dia):
+        """Sugerencia de compra a medianoche de `dia`, validada contra las ventas reales del horizonte."""
         from preve_pipeline import calcular_recomendacion
         hz = int(self.ciclo['horizonte_pronostico_dias'])
         ventas_hasta, stock_hasta = self.datos.hasta(dia)
@@ -265,6 +270,7 @@ class Backtester:
 
     # ── ejecución ──────────────────────────────────────────
     def run(self, fecha_inicio, fecha_fin, simular_compras=True):
+        """Walk-forward en el rango + simulación de compras; guarda en la base y exporta el Excel."""
         t0 = datetime.datetime.now()
         fecha_fin = min(pd.Timestamp(fecha_fin), self.datos.ultima_fecha)
         ventanas = self.ventanas(fecha_inicio, fecha_fin)

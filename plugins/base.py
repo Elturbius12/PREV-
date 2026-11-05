@@ -4,6 +4,7 @@
 Para agregar un ERP nuevo: crea `plugins/<nombre>/__init__.py` con una subclase de PluginERP decorada
 con `@registrar`. Se detecta sola al iniciar (ver plugins.descubrir_plugins).
 """
+from preve_utils import log_info
 import os
 from abc import ABC, abstractmethod
 
@@ -24,6 +25,7 @@ class PluginERP(ABC):
         return {campo: os.getenv(var, '') for campo, var in self.variables_credenciales.items()}
 
     def credenciales_completas(self):
+        """True si todas las credenciales están definidas en el entorno."""
         return all(self.credenciales().values())
 
     def opciones_disponibles(self):
@@ -31,7 +33,7 @@ class PluginERP(ABC):
         return {}
 
     @abstractmethod
-    def extraer(self, carpeta_destino, opciones=None, log=print):
+    def extraer(self, carpeta_destino, opciones=None, log=log_info):
         """Descarga los reportes. Devuelve la carpeta donde quedaron (debe ser legible por el pipeline)."""
 
 
@@ -47,4 +49,5 @@ def registrar(cls):
 
 
 def registro():
+    """Copia del registro {clave: clase} de plugins."""
     return dict(_REGISTRO)

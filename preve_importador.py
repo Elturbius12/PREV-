@@ -21,7 +21,7 @@ import unicodedata
 import numpy as np
 import pandas as pd
 
-from preve_utils import get_logger
+from preve_utils import get_logger, log_info
 
 logger = get_logger('importador')
 
@@ -143,6 +143,7 @@ def detectar_formato_fecha(serie, muestra=500):
 
 
 def convertir_fechas(serie, formato='auto'):
+    """Convierte texto a fechas con el formato dado ("auto" = día primero, formato mixto)."""
     if not formato or formato == 'auto':
         return pd.to_datetime(serie, dayfirst=True, errors='coerce', format='mixed')
     return pd.to_datetime(serie.astype(str).str.strip(), format=formato, errors='coerce')
@@ -244,6 +245,7 @@ class ResultadoImportacion(dict):
 
 
 def escribir_reporte_errores(errores, carpeta, nombre=None):
+    """Excel con resumen de errores y detalle por fila. Devuelve la ruta."""
     ruta = os.path.join(carpeta, nombre or NOMBRE_REPORTE_ERRORES.format(datetime.datetime.now()))
     resumen = errores.groupby('error').size().rename('filas').reset_index().sort_values('filas', ascending=False)
     with pd.ExcelWriter(ruta) as xw:
@@ -253,10 +255,10 @@ def escribir_reporte_errores(errores, carpeta, nombre=None):
 
 
 def importar(ruta, mapeo, db=None, formato_fecha=None, sucursal_defecto=None, exigir_producto_existente=True,
-             carpeta_errores=None, log=print):
+             carpeta_errores=None, log=log_info):
     """Lee, valida y guarda las ventas válidas en ventas_diarias. Devuelve ResultadoImportacion."""
     from database import Database
-    from preve_config import Config
+
     db = db or Database.default()
     df = leer_archivo(ruta)
     log(f'Leídas {len(df):,} filas de {os.path.basename(ruta)}')

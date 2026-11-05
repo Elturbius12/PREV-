@@ -36,6 +36,11 @@ def configurar_logging(nivel=logging.INFO, carpeta=None):
     return ruta
 
 
+def log_info(mensaje):
+    """Destino por defecto de los mensajes de progreso (antes `print`): el logger 'preve' (consola + preve.log)."""
+    logging.getLogger('preve').info(mensaje)
+
+
 def safe_int(val, default=0):
     """int() que no revienta con NaN, None, inf o texto no numérico."""
     # FIX: int(NaN) lanzaba ValueError y rompía vistas e informe

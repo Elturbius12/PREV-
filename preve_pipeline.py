@@ -22,7 +22,7 @@ negocio, nunca inventadas):
 
 Uso (desde preve_app.py, o desde consola):
     from preve_pipeline import ejecutar_pipeline
-    ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print)
+    ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info)
 """
 
 import os
@@ -32,7 +32,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from preve_utils import get_logger
+from preve_utils import get_logger, log_info
 from preve_config import ParametrosModelo, normalizar_ubicacion
 
 warnings.filterwarnings('ignore')
@@ -153,7 +153,7 @@ COLUMNAS_VENTAS_CANONICAS = {'fecha': 'FECHA/HORA', 'codigo_barras': 'CÓDIGO DE
 CAMPOS_VENTAS_OBLIGATORIOS = ('fecha', 'codigo_barras', 'cantidad')
 
 
-def aplicar_mapeo_ventas(ventas, mapeo, log=print):
+def aplicar_mapeo_ventas(ventas, mapeo, log=log_info):
     """Renombra las columnas del Excel de ventas según el mapeo configurado (campo → columna del archivo).
 
     Raises: ValueError si falta una columna obligatoria (fecha, código de barras, cantidad).
@@ -258,6 +258,7 @@ def _clasificar_archivos(carpeta):
 # Etapa 1: cargar y unificar
 # ---------------------------------------------------------------------------
 def cargar_datos(carpeta_entrada, log):
+    """Lee y deduplica los reportes del ERP de la carpeta (listado, ventas, compras, movimientos)."""
     clasif, sin_clasificar = _clasificar_archivos(carpeta_entrada)
     if sin_clasificar:
         log(f'⚠ {len(sin_clasificar)} archivo(s) no reconocido(s), se ignoran: '
@@ -307,6 +308,7 @@ def cargar_datos(carpeta_entrada, log):
 # Etapa 2: canonicalizar SKU (código de barras + sufijo si colisiona)
 # ---------------------------------------------------------------------------
 def construir_dim_producto(listado, log):
+    """Catálogo con SKU canónico (código de barras + sufijo si colisiona)."""
     df = listado.copy()
     if '__mtime' in df.columns:
         df = df.sort_values('__mtime', kind='stable')
@@ -315,7 +317,6 @@ def construir_dim_producto(listado, log):
 
     # Detectar colisiones: mismo código de barras, nombres de producto distintos
     colisiones = 0
-    sufijos = {}
     sku_final = []
     vistos = {}
     for _, row in df.iterrows():
@@ -547,15 +548,14 @@ def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_bc_
 # ---------------------------------------------------------------------------
 def construir_panel_y_segmentacion(stock, ventas_diarias, dim, log, params=None):
     # FIX: umbrales ADI/CV², semanas de lanzamiento e IGV desde la configuración (antes fijos)
+    """Panel semanal, segmentación ADI/CV² con modelo asignado y clase ABC por margen."""
     p = params or ParametrosModelo()
     ventas_diarias = ventas_diarias.copy()
     ventas_diarias['fecha'] = pd.to_datetime(ventas_diarias['fecha'])
     ventas_diarias['unidades'] = -ventas_diarias['mov']
     ventas_diarias = ventas_diarias[ventas_diarias['unidades'] >= 0]
 
-    fecha_ini = ventas_diarias['fecha'].min()
     fecha_fin = ventas_diarias['fecha'].max()
-    semanas = pd.date_range(fecha_ini, fecha_fin, freq='W-MON')
 
     ventas_diarias['semana'] = ventas_diarias['fecha'].dt.to_period('W-SUN').apply(lambda p: p.start_time)
     panel = ventas_diarias.groupby(['sku', 'semana'])['unidades'].sum().reset_index()
@@ -662,6 +662,7 @@ def construir_features_lgb(sub):
 
 
 def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log, params=None):
+    """Entrena Croston-TSB, LightGBM y CatBoost y pronostica el horizonte (p10/p50/p90)."""
     import lightgbm as lgb
     from catboost import CatBoostRegressor
     from statsforecast.models import TSB

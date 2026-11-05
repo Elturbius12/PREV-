@@ -41,18 +41,22 @@ def horizonte():
 
 
 def duracion_ciclo():
+    """Duración (días de revisión) del ciclo principal."""
     return int(Config.actual().ciclo_principal['duracion_dias'])
 
 
 def igv():
+    """Factor de IGV de la empresa (1.18 = 18%)."""
     return Config.actual().empresa['igv_factor']
 
 
 def empresa_nombre():
+    """Nombre de la empresa configurada."""
     return Config.actual().empresa['nombre']
 
 
 def sucursales():
+    """Nombres de las sucursales activas (al menos una)."""
     return Config.actual().nombres_sucursales or ['Principal']
 
 
@@ -73,6 +77,7 @@ _MAPA_CFG = {'usuario': 'usuario_nombre', 'sucursal': 'sucursal_activa', 'ultima
 
 
 def config_defecto():
+    """Configuración de la interfaz con los valores por defecto."""
     from preve_config import DEFAULTS
     return {k: DEFAULTS[v][0] for k, v in _MAPA_CFG.items()} | {'sucursales': {}}
 
@@ -108,17 +113,20 @@ def guardar_config(cfg):
 # Formato
 # ══════════════════════════════════════════════════════════════════
 def fmt_num(n, dec=0):
+    """Número con separador de miles y `dec` decimales; "—" si no hay dato."""
     if n is None or (isinstance(n, float) and (np.isnan(n) or np.isinf(n))):
         return '—'
     return f'{n:,.{dec}f}'
 
 
 def fmt_soles(n, dec=0):
+    """Monto como "S/ 1,234"; "—" si no hay dato."""
     v = fmt_num(n, dec)
     return v if v == '—' else f'S/ {v}'
 
 
 def fecha_larga(d):
+    """Fecha como "5 de noviembre"."""
     return f'{d.day} de {_MESES[d.month - 1]}'
 
 
@@ -138,6 +146,7 @@ def hace_texto(dt):
 
 
 def semanas_texto(sem):
+    """Duración legible ("3 semanas", "2 días") a partir de semanas decimales."""
     if sem is None or np.isinf(sem):
         return 'bastante tiempo'
     if sem < 1:
@@ -163,6 +172,7 @@ def es_compra(df):
 
 
 def derivar(df, lead=None):
+    """Agrega las columnas de la interfaz: venta semanal, días de stock, es_compra, urgencia y confianza."""
     lead = lead_time() if lead is None else lead
     d = df.copy()
     for c in _NUM:
@@ -202,6 +212,7 @@ def derivar(df, lead=None):
 
 
 def confianza_motivo(r):
+    """Por qué el pronóstico del producto tiene la confianza que tiene."""
     if r['revisar_antes_de_comprar']:
         return 'La cantidad parece inflada por una venta puntual fuera de lo común.'
     if r['dato_incompleto']:
@@ -258,6 +269,7 @@ class Datos:
 
     # ── carga ──────────────────────────────────────────────
     def recargar(self):
+        """Vuelve a leer recomendación, ciclo, decisiones, comparación y scorecard de la carpeta."""
         self.df = None
         self.fecha_datos = None
         self.ciclo = None
@@ -297,10 +309,12 @@ class Datos:
 
     @property
     def tiene_datos(self):
+        """True si hay una recomendación cargada."""
         return self.df is not None and len(self.df) > 0
 
     @property
     def fecha_ref(self):
+        """Fecha de los datos (o ahora si no se conoce)."""
         return self.fecha_datos or datetime.datetime.now()
 
     # ── decisiones del usuario ─────────────────────────────
@@ -318,6 +332,7 @@ class Datos:
         return d['estado']
 
     def decidir(self, sku, estado, razon='', dias_posponer=7):
+        """Guarda la decisión del usuario sobre un producto (pospuesto: por `dias_posponer` días)."""
         hasta = None
         if estado == 'pospuesto':
             hasta = (datetime.date.today() + datetime.timedelta(days=dias_posponer)).isoformat()
@@ -326,20 +341,24 @@ class Datos:
                                      'fecha': datetime.datetime.now().isoformat()}
 
     def deshacer(self, sku):
+        """Elimina la decisión del usuario sobre un producto."""
         hist.borrar_decision(self.carpeta, sku, self.ciclo_num, self.sucursal)
         self.decisiones.pop(str(sku), None)
 
     # ── vistas de la tabla ─────────────────────────────────
     def recompras(self):
+        """Productos cuya acción implica comprar."""
         return self.df[self.df['es_compra']] if self.tiene_datos else pd.DataFrame()
 
     def pendientes(self):
+        """Productos a comprar que el usuario todavía no decidió."""
         r = self.recompras()
         if r.empty:
             return r
         return r[r['sku'].map(self.estado) == 'pendiente']
 
     def top_impacto(self, n=20):
+        """Las `n` compras pendientes de mayor inversión."""
         p = self.pendientes()
         return p.sort_values('costo_total_compra_pen', ascending=False).head(n)
 
@@ -370,6 +389,7 @@ class Datos:
 
     # ── KPIs (todos derivados de columnas reales) ──────────
     def kpis(self):
+        """KPIs de la pantalla de inicio, todos calculados con columnas reales (None si no hay datos)."""
         if not self.tiene_datos:
             return None
         d = self.df
@@ -419,6 +439,7 @@ class Datos:
 
     # ── búsqueda global ────────────────────────────────────
     def buscar(self, texto, limite=6):
+        """Búsqueda global en la recomendación, el historial y los traslados sugeridos."""
         texto = (texto or '').strip().lower()
         res = {'recomendacion': [], 'historial': [], 'traslados': []}
         if len(texto) < 2:

@@ -26,8 +26,8 @@ from tkinter import filedialog, messagebox
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import preve_ui as ui
-from preve_ui import (S, f, Btn, Card, Chip, ProgressBar, Toasts, label, entry, menu, mezclar,
-                      BG, SURFACE, TEXT, TEXT_DIM, TEXT_MUTED, ACCENT, ACCENT_TINT, CARD_ALT, BORDER,
+from preve_ui import (S, f, Btn, Card, Chip, ProgressBar, Toasts, label, menu, mezclar,
+                      BG, SURFACE, TEXT, TEXT_DIM, TEXT_MUTED, ACCENT, ACCENT_TINT, BORDER,
                       DANGER, BRAND_ORANGE)
 import preve_datos as dt
 import preve_vistas as vs
@@ -38,6 +38,8 @@ logger = get_logger('app')
 # ══════════════════════════════════════════════════════════════════
 # Frases, consejos y datos curiosos para mostrar mientras se genera
 # ══════════════════════════════════════════════════════════════════
+# FIX (Fase 7): se quitaron citas mal atribuidas o de autoría dudosa (p. ej. la de "adaptarse al cambio",
+# que no es de Darwin) y una estadística sin fuente. Las que quedan tienen atribución reconocida.
 FRASES_CARGA = [
     # — Frases de empresarios —
     '💡 "Hay un solo jefe: el cliente. Él puede despedir a todos, desde el presidente para abajo, simplemente gastando su dinero en otro lado." — Sam Walton, fundador de Walmart',
@@ -45,12 +47,6 @@ FRASES_CARGA = [
     '💡 "Gestión es hacer las cosas bien; liderazgo es hacer lo correcto." — Peter Drucker',
     '💡 "Tu tiempo es limitado, no lo malgastes viviendo la vida de alguien distinto." — Steve Jobs',
     '💡 "No esperes. Nunca va a ser el momento justo. Empieza donde te encuentras." — Napoleón Hill',
-    '💡 "Quien sobrevive no es el más fuerte ni el más inteligente, sino el que mejor se adapta al cambio." — Charles Darwin',
-    '💡 "Todo negocio es un negocio de servicios." — Philip Kotler',
-    '💡 "La cualidad de un líder se refleja en las exigencias que se pone a sí mismo." — Ray Kroc, fundador de McDonald\'s',
-    '💡 "Antes que cualquier otra cosa, estar preparado es el secreto del éxito." — Henry Ford',
-    '💡 "Hacer las cosas es mucho mejor que hablar de ellas. ¡Actúa!" — Tom Peters',
-    '💡 "Es a través de la curiosidad y la búsqueda de nuevas oportunidades que hemos mapeado nuestro camino." — Michael Dell',
     '💡 "Lo más peligroso es no evolucionar." — Jeff Bezos, fundador de Amazon',
     '💡 "El éxito no se mide por lo que logras, sino por los obstáculos que superas." — Booker T. Washington',
 
@@ -75,7 +71,6 @@ FRASES_CARGA = [
     '🌎 ¿Sabías que? La primera tienda por departamentos del mundo fue Le Bon Marché, abierta en París en 1838.',
     '🌎 ¿Sabías que? Juliaca es uno de los principales centros comerciales del sur del Perú, con un comercio que mueve millones cada día.',
     '🌎 ¿Sabías que? Las importaciones de autopartes en Perú crecen cada año. Es un mercado con mucho potencial.',
-    '🌎 ¿Sabías que? Un buen pronóstico de demanda puede reducir el sobre-stock hasta en un 30% y los quiebres de stock en un 65%.',
 
     # — Motivación para el usuario —
     '🚀 Cada vez que usas datos para decidir qué comprar, le llevas ventaja a tu competencia.',
@@ -83,7 +78,7 @@ FRASES_CARGA = [
     '🚀 Un negocio que mide, mejora. Estás en el camino correcto.',
     '🚀 Mientras esperas, PREVÉ está entrenando 3 modelos de inteligencia artificial con tus datos reales.',
     '🚀 Invertir en los productos correctos es la diferencia entre crecer y solo sobrevivir.',
-    '🚀 Tus 3 sucursales pueden trabajar como un solo equipo: lo que sobra aquí, se necesita allá.',
+    '🚀 Tus sucursales pueden trabajar como un solo equipo: lo que sobra en una, se necesita en otra.',
 ]
 
 PASOS = ['Cargando tus reportes del ERP', 'Identificando productos y códigos de barra',
@@ -666,7 +661,6 @@ class PreveApp:
             w['ic'].configure(fg=ACCENT if on else TEXT_DIM)
             w['tx'].configure(fg=ACCENT if on else TEXT, font=f(10, 'bold' if on else 'normal'))
             w['badge'].configure(bg=bg)
-        self._activo = activo
         self.actualizar_badge()
 
     def actualizar_badge(self):

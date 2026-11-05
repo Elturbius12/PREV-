@@ -11,12 +11,12 @@ Permite al usuario responder preguntas como:
 La simulación NO re-entrena modelos: toma la recomendación ya calculada
 y aplica ajustes paramétricos sobre ella.
 """
-import copy
+from preve_utils import log_info
 import pandas as pd
 import numpy as np
 
 
-def simular(recomendacion, escenario, log=print, lead_time_actual=36, horizonte_actual=141,
+def simular(recomendacion, escenario, log=log_info, lead_time_actual=36, horizonte_actual=141,
             z_actual=None, plantilla=None):
     """Aplica un escenario what-if a una recomendación existente.
 
@@ -203,7 +203,6 @@ def _reclasificar_accion(row):
     """Versión simplificada de la clasificación de acciones para simulación."""
     stock = row.get('stock_actual', 0)
     demanda = row.get('demanda_p50_141d', 0)
-    rop = row.get('rop', 0)
     compra = row.get('compra_sugerida_unid', 0)
     margen = row.get('margen_pct', 0)
     tendencia = row.get('tendencia_venta', 0)
@@ -249,7 +248,7 @@ def _describir_escenario(escenario):
     return ' | '.join(partes) if partes else 'sin cambios'
 
 
-def generar_excel_simulacion(resultado, carpeta_salida, nombre='PREVE_Simulacion.xlsx', log=print):
+def generar_excel_simulacion(resultado, carpeta_salida, nombre='PREVE_Simulacion.xlsx', log=log_info):
     """Genera un Excel con la comparación original vs simulado."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment

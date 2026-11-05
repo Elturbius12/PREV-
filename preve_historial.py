@@ -9,10 +9,9 @@ automáticamente la primera vez.
 """
 import os
 
-import pandas as pd
 
 from database import Database
-from preve_utils import get_logger
+from preve_utils import get_logger, log_info
 
 logger = get_logger('historial')
 
@@ -32,7 +31,7 @@ def _db(carpeta_salida=None):
 
 
 def registrar_ejecucion(carpeta_salida, recomendacion, info_ciclo=None,
-                        sucursal='San José', scorecard=None, log=print):
+                        sucursal='San José', scorecard=None, log=log_info):
     """Guarda una ejecución completa en el historial. Devuelve el id de la ejecución."""
     ej_id = _db(carpeta_salida).registrar_ejecucion(sucursal, recomendacion, info_ciclo, scorecard)
     etiqueta = (info_ciclo or {}).get('etiqueta', '')
@@ -41,14 +40,17 @@ def registrar_ejecucion(carpeta_salida, recomendacion, info_ciclo=None,
 
 
 def consultar_historial(carpeta_salida, sucursal=None, ultimas_n=10):
+    """Últimas ejecuciones (de la sucursal si se indica)."""
     return _db(carpeta_salida).consultar_ejecuciones(sucursal, ultimas_n)
 
 
 def consultar_recomendacion_sku(carpeta_salida, sku, ultimas_n=5):
+    """Historial de recomendaciones de un SKU."""
     return _db(carpeta_salida).recomendaciones_de_sku(sku, ultimas_n)
 
 
 def consultar_evolucion_metricas(carpeta_salida, sucursal=None):
+    """Ejecuciones con sus métricas de validación, en orden cronológico."""
     return _db(carpeta_salida).evolucion_metricas(sucursal)
 
 
@@ -56,6 +58,7 @@ def consultar_evolucion_metricas(carpeta_salida, sucursal=None):
 # Decisiones del usuario sobre cada recomendación (comprado / posponer / descartar)
 # ══════════════════════════════════════════════════════════════════
 def historial_existe(carpeta_salida):
+    """True si hay al menos una ejecución registrada."""
     return _db(carpeta_salida).hay_ejecuciones()
 
 
@@ -65,6 +68,7 @@ def guardar_decision(carpeta_salida, sku, ciclo, estado, razon='', hasta=None, s
 
 
 def borrar_decision(carpeta_salida, sku, ciclo, sucursal='San José'):
+    """Elimina la decisión del usuario sobre un producto en un ciclo."""
     _db(carpeta_salida).borrar_decision(sku, sucursal, ciclo)
 
 

@@ -2,6 +2,23 @@
 
 Todos los cambios relevantes de PREVÉ, organizados por fase.
 
+## [Fase 7] — 2026-11-05 · Limpieza, logging, tests y documentación
+
+### Corregido
+- **Stock histórico NaN** en `reconstruir_stock` (bug reportado en la Fase 6): `fillna(0)` tras `pivot()`. Con los datos reales aparecen 776 SKU con stock negativo en algún día (antes se informaban 11, porque los NaN no contaban). La Simulación Compras del backtesting ya es válida.
+
+### Cambiado
+- **7.1 Código muerto eliminado:** `semanas`, `import copy`, `entry`/`CARD_ALT`/`self._activo` de la app, `OK_BG`/`WARN_BG`/`DANGER_BG`, `razon_abierta` y `VistaSimular.tecla`, más 12 restos que encontró pyflakes. 7 frases de carga con atribución dudosa eliminadas (incluida la falsa de Darwin) y una estadística sin fuente.
+- **7.2 Logging:** `configurar_logging()` escribe en consola y en `preve.log` (rotación 5 MB × 3). Los 20 `log=print` por defecto pasan a `log_info` (logger `preve`).
+- **7.4 Documentación:** README reescrito, `ARQUITECTURA.md` (capas, flujo del análisis y del backtesting, esquema), `CONTRIBUTING.md` (plugins, plantillas, migraciones) y docstrings en 107 funciones públicas del motor.
+- **7.5 Instaladores:** `INSTALAR.bat` e `instalar.sh` verifican Python 3.11+ (y tkinter en Linux), crean `.venv`, instalan dependencias, migran la base (idempotente) e inician la app. Los scripts anteriores quedan como alias. `.gitattributes` fuerza LF en los `.sh`.
+
+### Tests
+- `tests/test_fase7.py`: stock sin NaN, conteo de negativos, carga de Excel del ERP con solapes, pipeline de punta a punta con los 3 modelos, clasificación clásica y logging.
+- Cobertura: pipeline 68% → **90%**; módulos críticos en conjunto **93%**. Total: **182 tests**.
+
+Ver `REPORTE_FINAL.md`.
+
 ## [Fase 6] — 2026-11-05 · Modo backtesting con walk-forward validation
 
 ### Agregado

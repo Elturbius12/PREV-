@@ -14,6 +14,7 @@ Uso:
     from preve_validacion import generar_scorecard
     generar_scorecard(carpeta_salida, recomendacion_anterior, ventas_reales, log)
 """
+from preve_utils import log_info
 import os
 import datetime
 import numpy as np
@@ -24,7 +25,7 @@ import pandas as pd
 # 1. Scorecard de precisión del pronóstico
 # ──────────────────────────────────────────────────────────
 
-def calcular_metricas_pronostico(recom_anterior, ventas_reales_periodo, log=print):
+def calcular_metricas_pronostico(recom_anterior, ventas_reales_periodo, log=log_info):
     """Compara pronóstico anterior vs. ventas reales en el periodo evaluado.
 
     Args:
@@ -112,7 +113,7 @@ def calcular_metricas_pronostico(recom_anterior, ventas_reales_periodo, log=prin
 # 2. Análisis contrafactual
 # ──────────────────────────────────────────────────────────
 
-def analisis_contrafactual(metricas_sku, log=print):
+def analisis_contrafactual(metricas_sku, log=log_info):
     """¿Qué habría pasado si se compraba exactamente lo que PREVÉ sugirió?
 
     Calcula por SKU:
@@ -171,7 +172,7 @@ def analisis_contrafactual(metricas_sku, log=print):
 # 3. Estimación de ROI
 # ──────────────────────────────────────────────────────────
 
-def estimar_roi(metricas_sku, contrafactual, resumen_contra, log=print, igv_factor=1.18):
+def estimar_roi(metricas_sku, contrafactual, resumen_contra, log=log_info, igv_factor=1.18):
     """Estima el ROI de usar PREVÉ.
 
     Componentes del beneficio:
@@ -240,10 +241,10 @@ def estimar_roi(metricas_sku, contrafactual, resumen_contra, log=print, igv_fact
 # 4. Generador de Excel scorecard
 # ──────────────────────────────────────────────────────────
 
-def generar_scorecard_excel(metricas_sku, agregadas, resumen_contra, roi, carpeta_salida, log=print):
+def generar_scorecard_excel(metricas_sku, agregadas, resumen_contra, roi, carpeta_salida, log=log_info):
     """Genera PREVE_Scorecard.xlsx con todas las métricas de validación."""
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
 
     ORANGE = 'FF6B00'
@@ -337,7 +338,7 @@ def generar_scorecard_excel(metricas_sku, agregadas, resumen_contra, roi, carpet
 # 5. Función orquestadora de validación
 # ──────────────────────────────────────────────────────────
 
-def generar_scorecard(carpeta_salida, recomendacion_anterior, ventas_reales_periodo, log=print,
+def generar_scorecard(carpeta_salida, recomendacion_anterior, ventas_reales_periodo, log=log_info,
                       igv_factor=1.18):
     """Ejecuta todo el proceso de validación y genera el Excel scorecard.
 

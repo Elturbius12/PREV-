@@ -16,7 +16,7 @@ from preve_config import Config
 from preve_validacion import generar_scorecard
 from preve_historial import registrar_ejecucion
 from preve_simulacion import simular, generar_excel_simulacion
-from preve_utils import get_logger
+from preve_utils import get_logger, log_info
 from database import slug
 
 logger = get_logger('orquestador')
@@ -34,7 +34,7 @@ def _archivos_ciclo_secundario(nombre):
     return f'PREVE_Notas_Compra_{slug(nombre)}.xlsx', f'recomendacion_compra_{slug(nombre)}.csv'
 
 
-def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=print,
+def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
                       sucursal='San José'):
     """Pipeline principal: reporte del ciclo principal + notas de compra de cada ciclo secundario."""
     os.makedirs(carpeta_salida, exist_ok=True)
@@ -309,7 +309,7 @@ def _generar_clasificacion(segmentacion, dim, stock, carpeta_salida, log):
     log(f'Excel de clasificación listo: {ruta}')
 
 
-def ejecutar_pipeline_multi_sucursal(carpeta_entrada, carpeta_salida, progreso=print):
+def ejecutar_pipeline_multi_sucursal(carpeta_entrada, carpeta_salida, progreso=log_info):
     """Ejecuta el pipeline para todas las sucursales que tengan datos.
 
     Busca subcarpetas con el nombre de cada sucursal dentro de carpeta_entrada,
@@ -427,7 +427,7 @@ def _generar_traslados(resultados, carpeta_salida, log):
         log('No se encontraron oportunidades de traslado entre sucursales.')
 
 
-def ejecutar_simulacion(carpeta_salida, escenario, progreso=print):
+def ejecutar_simulacion(carpeta_salida, escenario, progreso=log_info):
     """Ejecuta una simulación what-if sobre la última recomendación guardada.
 
     Args:

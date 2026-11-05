@@ -11,7 +11,7 @@ import pandas as pd
 import preve_ui as ui
 from preve_ui import (S, f, Card, Btn, Chip, ProgressBar, Slider, ScrollFrame, Skeleton, label, entry, menu,
                       BG, SURFACE, TEXT, TEXT_DIM, TEXT_MUTED, ACCENT, ACCENT_TINT, CARD_ALT, BORDER,
-                      OK, WARN, DANGER, WARN_BG, DANGER_BG, OK_BG)
+                      OK, WARN, DANGER)
 import preve_datos as dt
 from preve_datos import fmt_num, fmt_soles, fecha_larga
 # FIX: safe_int en vez de int() donde el valor puede ser NaN (antes ValueError rompía la vista)
@@ -377,7 +377,7 @@ RAZONES = ['Sin presupuesto', 'Tengo stock en otra sucursal', 'Proveedor sin dis
 class VistaRecom(Vista):
     def build(self):
         self.filtro, self.limite = 'pend', PAGINA
-        self.abiertos, self.filas, self.razon_abierta = set(), {}, None
+        self.abiertos, self.filas = set(), {}
         self.texto = tk.StringVar()
         self._debounce = None
         enc = self.encabezado(self, 'Recomendaciones', '')
@@ -415,7 +415,6 @@ class VistaRecom(Vista):
         if filtro:
             self.filtro = filtro
         self.abiertos = set()
-        self.razon_abierta = None
         self.limite = PAGINA
         if sku:
             self.filtro = 'todo'
@@ -568,7 +567,6 @@ class VistaRecom(Vista):
             self.abiertos.discard(sku)
         else:
             self.abiertos.add(sku)
-        self.razon_abierta = None
         self.render()
 
     # ── detalle expandido ──────────────────────────────────
@@ -811,9 +809,6 @@ class VistaSimular(Vista):
         self.cont = self.scroll.inner
         self.valores = {p['k']: p['ini'] for p in self.PARAMS}
         self.ocupado = False
-
-    def tecla(self, k):
-        pass
 
     def on_show(self, **kw):
         self.limpiar(self.cont)
