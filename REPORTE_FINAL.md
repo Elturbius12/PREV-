@@ -1,4 +1,4 @@
-# Reporte final — PREVÉ: de prototipo a producto (Fases 0–7)
+# Reporte final — PREVÉ: de prototipo a producto (Fases 0–7; Fases 8–10 en la sección 7)
 
 Período: 2026-11-05 · Commits: `03495e9` (fase 0) → `fase 7` · Repositorio: https://github.com/Elturbius12/PREV-
 
@@ -10,7 +10,7 @@ PREVÉ pasó de ser un prototipo con resultados incorrectos (fuga de informació
 - **con importación de cualquier ERP** y Negosy como plugin;
 - **con reglas de acción editables**, sin `eval`;
 - **con backtesting walk-forward**;
-- **con 182 tests.**
+- **con 218 tests** (182 al cerrar la Fase 7; las Fases 8–10 sumaron el resto).
 
 ## 2. Bugs corregidos y cómo se verificaron
 
@@ -52,8 +52,8 @@ PREVÉ pasó de ser un prototipo con resultados incorrectos (fuga de informació
 | | Antes (`8493117`) | Después |
 |---|---|---|
 | Código Python (sin tests) | 6.687 líneas en 12 archivos | 11.721 líneas en 28 archivos |
-| Tests | 0 | **182** (116 funciones, 7 archivos) |
-| Cobertura de los módulos críticos | 0% | **93%**: pipeline 90%, database 93%, backtesting 92%, validación 97%, reglas 92%, importador 97%, config 92% |
+| Tests | 0 | **182** al cierre de la Fase 7 (116 funciones, 7 archivos); **218** hoy |
+| Cobertura de los módulos críticos (medida al cierre de la Fase 7) | 0% | **93%**: pipeline 90%, database 93%, backtesting 92%, validación 97%, reglas 92%, importador 97%, config 92% |
 | Valores de negocio fijos | ~20 (141, 36, 105, 30, 10, 40, 1.18 ×4, Z, ADI, CV², 13 semanas, 3 sets de hiperparámetros, 3 listas de sucursales, almacenes de San José, 'Julio', 'Yuju Store' ×6, `lt_orig`, 3 umbrales de NEGOCIAR) | **0** (todos en la base, con valores por defecto documentados) |
 | `except Exception: pass` | 14 | 0 |
 | SQL fuera de la capa de datos | `preve_historial.py` completo | 0 |
@@ -91,6 +91,14 @@ PREVÉ pasó de ser un prototipo con resultados incorrectos (fuga de informació
 3. **API:** exponer el orquestador como servicio (FastAPI): `POST /importaciones`, `POST /analisis` (asíncrono, con cola tipo Celery o RQ) y `GET /recomendaciones`. La UI de tkinter pasa a ser un cliente más, o se reemplaza por una web.
 4. **Trabajos pesados:** entrenamiento y backtesting en *workers*. Los resultados ya se persisten en tablas, así que el front solo consulta.
 5. **Archivos:** reportes subidos y Excel generados en almacenamiento de objetos (S3 o compatible), con URLs firmadas.
-6. **Plugins por tenant:** las credenciales del ERP en un gestor de secretos, no en `.env`. El extractor Playwright corre en un worker aislado.
+6. **Plugins por tenant:** las credenciales del ERP en un gestor de secretos; hoy están en `.env` o, sin cifrar, en la tabla `configuracion` (Fase 10). El extractor Playwright corre en un worker aislado.
 7. **Autenticación y roles:** usuarios por empresa; el campo `decisiones_compra.usuario` ya existe.
 8. **Observabilidad:** `logging` ya está centralizado; enviarlo a un colector y agregar métricas de duración por paso, que hoy se guardan en `pasos_s`.
+
+## 7. Después de este reporte: Fases 8–10
+
+- **Fase 8 — Depurar datos** (`preve_depurar.py`): borra la base de datos de datos y el historial, los reportes generados (las subcarpetas de período), los logs y el estado del ciclo para empezar de cero. Conserva la configuración (empresa, sucursales, ciclos, plantillas, parámetros). Siempre arma antes un ZIP de respaldo en `respaldos_depurar/`.
+- **Fase 9 — Resultados por período:** cada análisis se guarda en `salida/AAAA-MM-DD_a_AAAA-MM-DD/` (la app lee siempre el más reciente). `ordenes_compra_abiertas.csv` y el estado del ciclo no cambian de lugar. La validación (scorecard) lee la recomendación del período anterior directamente. «Depurar datos» ahora borra solo las subcarpetas de período. Botón «Abrir carpeta de resultados».
+- **Fase 10 — Negosy configurable e incremental:** URL de login, URL base por sucursal, texto de la tarjeta, usuario y contraseña se editan en Configuración (el `.env` sigue valiendo, con menor prioridad). La primera descarga trae 730 días; las siguientes, desde el día siguiente al último período importado **hasta ayer**, en `entrada/AAAA-MM-DD_a_AAAA-MM-DD/`, con marcador de descarga completa. El catálogo se descarga siempre por defecto porque de él sale el stock.
+
+Pendiente de esta etapa: la descarga real contra Negosy con los ajustes nuevos solo se probó con un extractor simulado.

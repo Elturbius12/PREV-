@@ -6,7 +6,7 @@ Aplicación de escritorio (Python + tkinter) que pronostica la demanda de cada p
 
 ## Qué hace
 
-1. **Importa** los reportes del ERP (listado, ventas, compras, movimientos). Acepta Excel o CSV de cualquier sistema con mapeo de columnas, y descarga automática desde Negosy como plugin.
+1. **Importa** los reportes del ERP (listado, ventas, compras, movimientos). Acepta Excel o CSV de cualquier sistema con mapeo de columnas, y descarga automática desde Negosy como plugin (incremental: solo trae lo que falta desde la última descarga).
 2. **Reconstruye el stock diario** hacia atrás desde el stock del listado. Neutraliza los traslados entre almacenes de la misma sucursal y evita el doble descuento si el ERP registra ventas como salidas.
 3. **Segmenta** cada producto con ADI/CV² (Syntetos-Boylan) y le asigna un modelo:
 
@@ -59,9 +59,11 @@ python preve_app.py
 
 La primera vez se abre un **asistente de 6 pantallas**: empresa, sucursales y sus almacenes, ciclos de compra, frecuencia de análisis, columnas del Excel de ventas y plantilla de categorías. Todo se puede editar después en *Configuración*.
 
-### Credenciales del ERP (`.env`)
+### Credenciales y URLs del ERP
 
-Solo hacen falta para la descarga automática desde Negosy:
+Solo hacen falta para la descarga automática desde Negosy. En *Configuración → Integración con tu ERP* (elige Negosy) se editan la URL de login, la URL base de cada sucursal, el usuario y la contraseña. Quedan en `preve.db` **sin cifrar** (app de escritorio de un solo usuario, mismo nivel de confianza que un `.env`).
+
+También siguen funcionando las variables de entorno, y si hay credenciales guardadas en Configuración **tienen prioridad**:
 
 ```bash
 cp .env.example .env    # y completar
@@ -69,7 +71,26 @@ NEGOSY_USUARIO=tu_usuario
 NEGOSY_CONTRASENA=tu_contrasena
 ```
 
-El `.env` nunca se sube a git. La integración se activa en *Configuración → Integración con tu ERP*.
+El `.env` nunca se sube a git.
+
+## Dónde quedan los archivos
+
+Cada análisis y cada descarga tienen su propia subcarpeta con las fechas de los **datos** (`AAAA-MM-DD_a_AAAA-MM-DD`):
+
+```
+entrada/                                   ← reportes del ERP
+├── 2024-11-06_a_2026-11-05/               ← primera descarga: 730 días
+└── 2026-11-06_a_2026-11-19/               ← siguientes: desde el día después del anterior hasta AYER
+    └── .descarga_completa                 ← solo cuenta como importada si la descarga terminó bien
+salida/                                    ← resultados
+├── ordenes_compra_abiertas.csv            ← lo editas a mano; se queda en la raíz
+├── 2026-11-06_a_2026-11-19/               ← una subcarpeta por análisis
+│   ├── recomendacion_compra.csv, PREVE_*.xlsx, PREVE_Informe_Gerencia.docx/.pdf, dashboard.html, …
+```
+
+La app lee siempre el período más reciente (*Inicio → Abrir carpeta de resultados* lo abre). El estado del ciclo vive en la base de datos. «Depurar datos» (Configuración) borra, entre otras cosas, solo las subcarpetas de período de la salida (con respaldo ZIP previo); nunca toca `ordenes_compra_abiertas.csv`. Los archivos sueltos de versiones anteriores no se mueven ni se borran.
+
+El catálogo de productos se descarga siempre por defecto: de él sale el stock actual. Desmarcar «Actualizar el catálogo» reutiliza el último y deja el stock con la fecha de ese catálogo (solo para pruebas).
 
 ## Uso
 
@@ -81,12 +102,12 @@ El `.env` nunca se sube a git. La integración se activa en *Configuración → 
 | Decisión rápida | Las 20 compras de mayor impacto, una por una |
 | Simular | ¿Y si la demanda sube 20%? ¿Y si el proveedor tarda más? |
 | Historial | Análisis anteriores con la variación de inversión |
-| Configuración | Empresa, sucursales, ciclos, categorías de acción (con editor visual), ERP y parámetros del modelo |
+| Configuración | Empresa, sucursales, ciclos, categorías de acción (con editor visual), ERP (URLs y credenciales de Negosy), parámetros del modelo y «Depurar datos» |
 | **Modo Backtesting** | Botón naranja de la barra superior: valida el modelo contra el pasado y exporta un Excel |
 
 Atajos: `Ctrl+G` generar · `Ctrl+S` simular · `Ctrl+K` buscar · `Ctrl+H` historial · `Ctrl+R` recomendaciones · `Ctrl+D` decisión rápida · `Ctrl+I` inicio.
 
-**Stock en tránsito:** completa `ordenes_compra_abiertas.csv` (se crea vacío en la carpeta de resultados) con las órdenes emitidas y aún no recibidas.
+**Stock en tránsito:** completa `ordenes_compra_abiertas.csv` (se crea vacío en la raíz de la carpeta de resultados, no dentro de un período) con las órdenes emitidas y aún no recibidas.
 
 ## Estructura
 
@@ -105,9 +126,11 @@ Atajos: `Ctrl+G` generar · `Ctrl+S` simular · `Ctrl+K` buscar · `Ctrl+H` hist
 | `database.py` | Capa de datos (SQLAlchemy Core): único lugar con SQL; SQLite por defecto, PostgreSQL con `PREVE_DB_URL` |
 | `preve_historial.py`, `preve_ciclo.py`, `preve_datos.py` | Historial, ciclo de compras y capa de datos de la UI |
 | `preve_informe.py` | Informe para gerencia (Word y PDF) |
-| `plugins/` | Integraciones con ERP (`PluginERP`), por ahora `negosy` |
+| `preve_depurar.py` | «Depurar datos»: borra los períodos de resultados y/o el historial, con respaldo ZIP |
+| `preve_utils.py` | Logging y carpetas de período (`nombre_periodo`, `ultimo_periodo`, `rango_descarga`) |
+| `plugins/` | Integraciones con ERP (`PluginERP`), por ahora `negosy` (`extractor.py` descarga, `tiendas.py` guarda sus ajustes) |
 | `scripts/migrar_a_sqlite.py` | Migración de los archivos de versiones anteriores a `preve.db` |
-| `tests/` | 182 tests (pytest) |
+| `tests/` | 218 tests (pytest) |
 
 Detalle técnico en [ARQUITECTURA.md](ARQUITECTURA.md), guía para contribuir en [CONTRIBUTING.md](CONTRIBUTING.md), cambios por fase en [CHANGELOG.md](CHANGELOG.md) y el estado del proyecto en [REPORTE_FINAL.md](REPORTE_FINAL.md).
 
@@ -115,7 +138,7 @@ Detalle técnico en [ARQUITECTURA.md](ARQUITECTURA.md), guía para contribuir en
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                          # 182 tests
+pytest                                          # 218 tests
 pytest --cov=preve_pipeline --cov=database --cov=preve_validacion --cov=preve_backtesting
 ```
 
