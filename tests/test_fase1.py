@@ -104,20 +104,30 @@ def _ventas_diarias(desde, dias, por_dia=1.0):
     return pd.DataFrame({'sku': 'A', 'fecha': fechas, 'mov': -por_dia})
 
 
+def _corrida(carpeta_salida, log, fecha, dias_venta):
+    """Simula una corrida del orquestador: crea el período, escribe su recomendación y valida."""
+    from preve_orquestador import _intentar_validacion, carpeta_periodo
+    fin = pd.Timestamp(fecha)
+    per = carpeta_periodo(carpeta_salida, fin - pd.Timedelta(days=13), fin)
+    _rec().to_csv(os.path.join(per, 'recomendacion_compra.csv'), index=False)
+    res = _intentar_validacion(_rec(), _ventas_diarias('2024-01-01', dias_venta), carpeta_salida, log,
+                               fecha_datos=fin, carpeta_periodo=per)
+    return per, res
+
+
 def test_1_3_validacion_usa_mov_y_solo_periodo_nuevo(carpeta_salida, log):
-    from preve_orquestador import _intentar_validacion
-    # 1ª corrida: guarda la referencia con fecha 2025-01-10
-    _intentar_validacion(_rec(), _ventas_diarias('2024-01-01', 376), carpeta_salida, log,
-                         fecha_datos=pd.Timestamp('2025-01-10'))
+    # 1ª corrida: su recomendación queda en el período que termina el 2025-01-10
+    _, res1 = _corrida(carpeta_salida, log, '2025-01-10', 376)
+    assert res1 is None
     # 2ª corrida 14 días después: el historial completo tiene 390 días de venta
-    res = _intentar_validacion(_rec(), _ventas_diarias('2024-01-01', 390), carpeta_salida, log,
-                               fecha_datos=pd.Timestamp('2025-01-24'))
+    per2, res = _corrida(carpeta_salida, log, '2025-01-24', 390)
     assert res is not None, log.mensajes
-    det = pd.read_excel(os.path.join(carpeta_salida, 'PREVE_Scorecard.xlsx'), sheet_name='Detalle por SKU')
+    det = pd.read_excel(os.path.join(per2, 'PREVE_Scorecard.xlsx'), sheet_name='Detalle por SKU')
     assert det['Venta real'].iloc[0] == 14            # solo las ventas del período, en positivo
     # C6: pronóstico prorrateado a 14 de 141 días → 141*14/141 = 14 → error 0
     assert det['Pronóstico'].iloc[0] == pytest.approx(14.0)
     assert res['agregadas']['wmape'] == 0
+    assert not os.path.exists(os.path.join(carpeta_salida, 'PREVE_Scorecard.xlsx'))   # nada suelto en la raíz
 
 
 def test_1_3_sin_referencia_fechada_no_valida(carpeta_salida, log):
@@ -129,12 +139,13 @@ def test_1_3_sin_referencia_fechada_no_valida(carpeta_salida, log):
 
 
 def test_a14_scorecard_viejo_no_se_reutiliza(carpeta_salida, log):
-    from preve_orquestador import _intentar_validacion
-    with open(os.path.join(carpeta_salida, 'scorecard_ultimo.json'), 'w') as f:
+    from preve_orquestador import _intentar_validacion, carpeta_periodo
+    per = carpeta_periodo(carpeta_salida, '2024-12-28', '2025-01-10')
+    with open(os.path.join(per, 'scorecard_ultimo.json'), 'w') as f:
         json.dump({'agregadas': {'wmape': 99}}, f)
     _intentar_validacion(_rec(), _ventas_diarias('2025-01-01', 10), carpeta_salida, log,
-                         fecha_datos=pd.Timestamp('2025-01-10'))
-    assert not os.path.exists(os.path.join(carpeta_salida, 'scorecard_ultimo.json'))
+                         fecha_datos=pd.Timestamp('2025-01-10'), carpeta_periodo=per)
+    assert not os.path.exists(os.path.join(per, 'scorecard_ultimo.json'))
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -53,6 +53,14 @@ echo Preparando la base de datos...
 ".venv\Scripts\python.exe" scripts\migrar_a_sqlite.py
 if errorlevel 1 echo Aviso: la migracion reporto diferencias. Revisa el detalle de arriba; PREVE igual puede abrirse.
 
+REM 4b. Navegador de Playwright (solo hace falta si usas "Descargar desde Negosy").
+REM     pip instala la libreria pero NO el navegador: hay que descargarlo aparte, una sola vez.
+if not exist "%LOCALAPPDATA%\ms-playwright" (
+    echo Descargando el navegador para la integracion con Negosy ^(una sola vez, puede tardar unos minutos^)...
+    ".venv\Scripts\python.exe" -m playwright install chromium
+    if errorlevel 1 echo Aviso: no se pudo descargar el navegador de Playwright. "Descargar desde Negosy" no funcionara hasta correr: .venv\Scripts\python.exe -m playwright install chromium
+)
+
 REM 5. Iniciar
 echo.
 echo Abriendo PREVE...

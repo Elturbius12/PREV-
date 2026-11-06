@@ -16,7 +16,7 @@ from preve_config import Config
 from preve_validacion import generar_scorecard
 from preve_historial import registrar_ejecucion
 from preve_simulacion import simular, generar_excel_simulacion
-from preve_utils import get_logger, log_info
+from preve_utils import (get_logger, log_info, listar_periodos, fin_de_periodo, NOMBRE_REC_CSV)
 from database import slug
 
 logger = get_logger('orquestador')
@@ -25,6 +25,32 @@ NOMBRE_REC_ANTERIOR = 'recomendacion_anterior.csv'
 NOMBRE_REC_ANTERIOR_META = 'recomendacion_anterior_meta.json'
 NOMBRE_SCORECARD_JSON = 'scorecard_ultimo.json'
 _COLS_DEMANDA = ('demanda_p50_141d', 'demanda_p10_141d', 'demanda_p90_141d')
+
+
+def carpeta_periodo(carpeta_salida, fecha_inicio, fecha_fin):
+    """Ruta `salida/AAAA-MM-DD_a_AAAA-MM-DD` (se crea si no existe)."""
+    def _iso(f):
+        return pd.Timestamp(f).date().isoformat()
+    ruta = os.path.join(carpeta_salida, f'{_iso(fecha_inicio)}_a_{_iso(fecha_fin)}')
+    os.makedirs(ruta, exist_ok=True)
+    return ruta
+
+
+def _carpeta_periodo_actual(carpeta_salida, fecha_datos, dias):
+    """Carpeta del período que se analiza: termina en la fecha de los datos y dura `dias` días.
+
+    Si la fecha de los datos no es válida, usa la fecha de hoy (nunca debe fallar el análisis).
+    """
+    try:
+        fin = pd.Timestamp(fecha_datos)
+        if pd.isna(fin):
+            raise ValueError('fecha de datos vacía')
+        fin = fin.normalize()
+        inicio = fin - pd.Timedelta(days=max(int(dias), 1) - 1)
+    except (ValueError, TypeError, OverflowError):
+        logger.warning('No se pudo determinar el período de los datos (%r); se usa la fecha de hoy', fecha_datos)
+        fin = inicio = pd.Timestamp(datetime.date.today())
+    return carpeta_periodo(carpeta_salida, inicio, fin)
 
 
 def _archivos_ciclo_secundario(nombre):
@@ -81,6 +107,10 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
         compras_son_entradas_de_almacen=params.compras_son_entradas_de_almacen,
         almacenes_propios=params.almacenes_propios)
     fecha_datos = stock.index.max()
+    # Cada análisis guarda sus resultados en su propia subcarpeta de período dentro de la salida.
+    # Lo que no es resultado (órdenes abiertas, estado del ciclo) se queda en la raíz.
+    carpeta_p = _carpeta_periodo_actual(carpeta_salida, fecha_datos, conf.get('dias_entre_importaciones'))
+    progreso(f'Los resultados se guardan en: {carpeta_p}')
     transito = cargar_ordenes_abiertas(carpeta_salida)
     if len(transito):
         progreso(f'Stock en tránsito: {len(transito)} SKU con órdenes abiertas ({transito.sum():,.0f} u)')
@@ -91,7 +121,7 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
 
     # Excel rápido de clasificación: ya se puede revisar mientras los modelos siguen entrenando
     try:
-        _generar_clasificacion(segmentacion, dim, stock, carpeta_salida, progreso)
+        _generar_clasificacion(segmentacion, dim, stock, carpeta_p, progreso)
     except (OSError, ValueError, KeyError) as e:
         # FIX: excepciones específicas + traceback en el log (es una salida opcional, no detiene el análisis)
         logger.exception('No se pudo generar el Excel de clasificación')
@@ -113,14 +143,14 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
     progreso(f'Generando archivos del reporte {nombre_p.lower()} ({etiqueta})...')
     info_ciclo['ciclo_nombre'] = principal['nombre']
     info_ciclo['horizonte_dias'] = hz_p
-    _generar_excel(rec_int, sin_pronostico, carpeta_salida, progreso,
+    _generar_excel(rec_int, sin_pronostico, carpeta_p, progreso,
                    etiqueta=etiqueta, info_ciclo=info_ciclo)
-    _generar_notas_compra_proveedor(rec_int, carpeta_salida, progreso, etiqueta=etiqueta)
-    _generar_dashboard(rec_int, sin_pronostico, carpeta_salida, progreso,
+    _generar_notas_compra_proveedor(rec_int, carpeta_p, progreso, etiqueta=etiqueta)
+    _generar_dashboard(rec_int, sin_pronostico, carpeta_p, progreso,
                        etiqueta=etiqueta, info_ciclo=info_ciclo, horizonte_semanas=params.horizonte_semanas)
 
-    rec_int.to_csv(os.path.join(carpeta_salida, 'recomendacion_compra.csv'), index=False)
-    sin_pronostico.to_csv(os.path.join(carpeta_salida, 'skus_sin_pronostico.csv'), index=False)
+    rec_int.to_csv(os.path.join(carpeta_p, NOMBRE_REC_CSV), index=False)
+    sin_pronostico.to_csv(os.path.join(carpeta_p, 'skus_sin_pronostico.csv'), index=False)
 
     # ══════════════════════════════════════════════════════════════════
     # CICLOS SECUNDARIOS (en Yuju: local, 40 días) — FIX (Fase 3): N ciclos configurables, no solo 2
@@ -137,16 +167,16 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
                                          lead_time_dias=ciclo['lead_time_dias'], params=params,
                                          plantilla=plantilla)
         nota, csv = _archivos_ciclo_secundario(ciclo['nombre'])
-        _generar_notas_compra_proveedor(rec_sec, carpeta_salida, progreso,
+        _generar_notas_compra_proveedor(rec_sec, carpeta_p, progreso,
                                         etiqueta=ciclo['nombre'].upper(), nombre_archivo=nota)
-        rec_sec.to_csv(os.path.join(carpeta_salida, csv), index=False)
+        rec_sec.to_csv(os.path.join(carpeta_p, csv), index=False)
 
     # ══════════════════════════════════════════════════════════════════
     # VALIDACIÓN AUTOMÁTICA (si existe recomendación anterior)
     # ══════════════════════════════════════════════════════════════════
     scorecard_result = _intentar_validacion(rec_int, ventas_diarias, carpeta_salida, progreso,
                                             fecha_datos=fecha_datos, horizonte_dias=hz_p,
-                                            igv_factor=params.igv_factor)
+                                            igv_factor=params.igv_factor, carpeta_periodo=carpeta_p)
 
     # FIX: la importación se confirma en el ciclo solo cuando el análisis terminó bien
     info_ciclo = dict(registrar_importacion(carpeta_salida, sucursal=sucursal,
@@ -179,7 +209,7 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
     progreso('Generando el informe para gerencia (Word y PDF)...')
     try:
         from preve_informe import generar_informe
-        generar_informe(carpeta_salida, sucursal, log=progreso)
+        generar_informe(carpeta_salida, sucursal, log=progreso, carpeta_periodo=carpeta_p)
     except Exception as e:  # noqa: BLE001 — el informe es opcional: cualquier fallo no debe perder el análisis
         # FIX: el error ahora queda en el log con traceback completo
         logger.exception('No se pudo generar el informe para gerencia')
@@ -187,9 +217,11 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
 
     progreso('═' * 60)
     extra = ' + ' + ', '.join(c['nombre'].upper() for c in secundarios) if secundarios else ''
-    progreso(f'¡Listo! Reporte {nombre_p} {etiqueta}{extra} generados en: {carpeta_salida}')
+    progreso(f'¡Listo! Reporte {nombre_p} {etiqueta}{extra} generados en: {carpeta_p}')
     progreso(f'Sucursal: {sucursal}')
     progreso('═' * 60)
+    # El nombre del período lo reutiliza el modo multi-sucursal para el archivo de traslados
+    rec_int.attrs['carpeta_periodo'] = carpeta_p
     return rec_int
 
 
@@ -357,9 +389,21 @@ def ejecutar_pipeline_multi_sucursal(carpeta_entrada, carpeta_salida, progreso=l
 
     # Generar reporte consolidado de TRASLADAR
     if len(resultados) > 1:
-        _generar_traslados(resultados, carpeta_salida, progreso)
+        _generar_traslados(resultados, _carpeta_periodo_traslados(resultados, carpeta_salida), progreso)
 
     return resultados
+
+
+def _carpeta_periodo_traslados(resultados, carpeta_salida):
+    """Carpeta de período (en la raíz multi-sucursal) con el mismo nombre que el de las sucursales."""
+    nombres = [os.path.basename(r.attrs['carpeta_periodo']) for r in resultados.values()
+               if r is not None and r.attrs.get('carpeta_periodo')]
+    if nombres:
+        ruta = os.path.join(carpeta_salida, max(nombres))
+        os.makedirs(ruta, exist_ok=True)
+        return ruta
+    hoy = datetime.date.today()
+    return carpeta_periodo(carpeta_salida, hoy, hoy)
 
 
 def _generar_traslados(resultados, carpeta_salida, log):
@@ -431,15 +475,18 @@ def ejecutar_simulacion(carpeta_salida, escenario, progreso=log_info):
     """Ejecuta una simulación what-if sobre la última recomendación guardada.
 
     Args:
-        carpeta_salida: carpeta con recomendacion_compra.csv.
+        carpeta_salida: carpeta de salida de la sucursal (se usa su período más reciente).
         escenario: dict con parámetros del escenario (ver preve_simulacion.simular).
         progreso: función de log.
 
     Returns:
         dict con recomendacion, comparacion, resumen.
     """
-    csv_rec = os.path.join(carpeta_salida, 'recomendacion_compra.csv')
-    if not os.path.exists(csv_rec):
+    # La simulación parte de la recomendación del período más reciente y deja su Excel allí
+    from preve_utils import ultimo_periodo
+    carpeta_p = ultimo_periodo(carpeta_salida)
+    csv_rec = os.path.join(carpeta_p, NOMBRE_REC_CSV) if carpeta_p else None
+    if not csv_rec or not os.path.exists(csv_rec):
         progreso('⚠ No se encontró recomendacion_compra.csv — ejecuta el pipeline primero.')
         return None
 
@@ -452,38 +499,60 @@ def ejecutar_simulacion(carpeta_salida, escenario, progreso=log_info):
                         horizonte_actual=principal['horizonte_pronostico_dias'],
                         z_actual=conf.get('z_nivel_servicio'),
                         plantilla=cargar_plantilla(conf.get('plantilla_categorias')))
-    generar_excel_simulacion(resultado, carpeta_salida, log=progreso)
+    generar_excel_simulacion(resultado, carpeta_p, log=progreso)
     return resultado
 
 
+def _periodo_anterior(carpeta_salida, carpeta_actual):
+    """Período más reciente, anterior al actual, que tenga recomendación. None si no hay."""
+    actual = os.path.basename(os.path.normpath(carpeta_actual)) if carpeta_actual else ''
+    previos = [r for r in listar_periodos(carpeta_salida, NOMBRE_REC_CSV)
+               if os.path.basename(r) < actual]
+    return previos[-1] if previos else None
+
+
 def _intentar_validacion(rec_actual, ventas_diarias, carpeta_salida, log, fecha_datos=None,
-                         horizonte_dias=141, igv_factor=1.18):
+                         horizonte_dias=141, igv_factor=1.18, carpeta_periodo=None):
     """Valida la recomendación anterior contra las ventas reales ocurridas desde entonces.
 
     ventas_diarias: DataFrame sku / fecha / mov (mov negativo = unidades vendidas), de reconstruir_stock.
     fecha_datos: fecha hasta la que llegan los datos de esta corrida (por defecto, la última venta).
+    carpeta_periodo: carpeta del período actual (donde se escribe el scorecard). La recomendación anterior
+        se lee directo del período anterior dentro de `carpeta_salida`; su fecha de datos es el final del
+        nombre de esa carpeta.
     Returns: dict del scorecard, o None si no hubo validación.
     """
-    csv_anterior = os.path.join(carpeta_salida, NOMBRE_REC_ANTERIOR)
-    meta_anterior = os.path.join(carpeta_salida, NOMBRE_REC_ANTERIOR_META)
-    sc_json = os.path.join(carpeta_salida, NOMBRE_SCORECARD_JSON)
-    # FIX: un scorecard de una corrida anterior nunca debe pasar como el de esta corrida
-    if os.path.exists(sc_json):
-        os.remove(sc_json)
     if fecha_datos is None:
         fecha_datos = ventas_diarias['fecha'].max()
     fecha_datos = pd.Timestamp(fecha_datos).normalize()
+    if carpeta_periodo is None:
+        carpeta_periodo = globals()['carpeta_periodo'](carpeta_salida, fecha_datos, fecha_datos)
+    sc_json = os.path.join(carpeta_periodo, NOMBRE_SCORECARD_JSON)
+    # FIX: un scorecard de una corrida anterior nunca debe pasar como el de esta corrida
+    if os.path.exists(sc_json):
+        os.remove(sc_json)
 
-    fecha_ant = None
-    if os.path.exists(meta_anterior):
-        try:
-            with open(meta_anterior, 'r', encoding='utf-8') as f:
-                fecha_ant = pd.Timestamp(json.load(f)['fecha_datos']).normalize()
-        except (OSError, ValueError, KeyError, json.JSONDecodeError):
-            logger.warning('No se pudo leer %s; se omite la validación', meta_anterior, exc_info=True)
+    csv_anterior, fecha_ant, legado = None, None, False
+    previo = _periodo_anterior(carpeta_salida, carpeta_periodo)
+    if previo:
+        csv_anterior = os.path.join(previo, NOMBRE_REC_CSV)
+        fin = fin_de_periodo(previo)
+        fecha_ant = pd.Timestamp(fin).normalize() if fin else None
+    else:
+        # Compatibilidad: referencia que dejaban las versiones anteriores directo en la raíz de salida
+        legado_csv = os.path.join(carpeta_salida, NOMBRE_REC_ANTERIOR)
+        meta_anterior = os.path.join(carpeta_salida, NOMBRE_REC_ANTERIOR_META)
+        if os.path.exists(legado_csv):
+            csv_anterior, legado = legado_csv, True
+            if os.path.exists(meta_anterior):
+                try:
+                    with open(meta_anterior, 'r', encoding='utf-8') as f:
+                        fecha_ant = pd.Timestamp(json.load(f)['fecha_datos']).normalize()
+                except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                    logger.warning('No se pudo leer %s; se omite la validación', meta_anterior, exc_info=True)
 
     resultado = None
-    if not os.path.exists(csv_anterior):
+    if csv_anterior is None:
         log('Primera ejecución — no hay recomendación anterior para validar.')
     elif fecha_ant is None:
         log('⚠ La recomendación anterior no tiene fecha de datos (versión antigua de PREVÉ): '
@@ -505,7 +574,7 @@ def _intentar_validacion(rec_actual, ventas_diarias, carpeta_salida, log, fecha_
             for col in _COLS_DEMANDA:
                 if col in recom_ant.columns:
                     recom_ant[col] = recom_ant[col] * factor
-            resultado = generar_scorecard(carpeta_salida, recom_ant, venta_real, log, igv_factor=igv_factor)
+            resultado = generar_scorecard(carpeta_periodo, recom_ant, venta_real, log, igv_factor=igv_factor)
             resultado['periodo'] = {'desde': str(fecha_ant.date()), 'hasta': str(fecha_datos.date()),
                                     'dias': dias, 'factor_prorrateo': round(factor, 4)}
             log(f'Scorecard: {resultado["agregadas"]["calificacion"]} '
@@ -517,12 +586,8 @@ def _intentar_validacion(rec_actual, ventas_diarias, carpeta_salida, log, fecha_
             logger.exception('Falló la validación de la recomendación anterior')
             log(f'⚠ No se pudo generar el scorecard: {type(e).__name__}: {e}')
             resultado = None
-
-    # La recomendación actual pasa a ser la referencia, con la fecha de sus datos
-    rec_actual.to_csv(csv_anterior, index=False)
-    with open(meta_anterior, 'w', encoding='utf-8') as f:
-        json.dump({'fecha_datos': str(fecha_datos.date())}, f)
-    log('Recomendación actual guardada como referencia para la próxima validación.')
+    if legado:
+        log('Se usó la referencia antigua de la raíz de salida; desde ahora cada período guarda la suya.')
     return resultado
 
 

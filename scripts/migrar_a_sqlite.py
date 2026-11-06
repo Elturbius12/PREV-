@@ -119,6 +119,11 @@ def migrar_carpeta(db, sucursal, carpeta, ver, entrada=None, con_ventas=False):
 
     # ── última recomendación → productos, pronósticos y stock ──
     ruta = os.path.join(carpeta, 'recomendacion_compra.csv')
+    if not os.path.exists(ruta):
+        # Estructura nueva: la recomendación vive en la subcarpeta del último período
+        from preve_utils import ultimo_periodo
+        per = ultimo_periodo(carpeta)
+        ruta = os.path.join(per, 'recomendacion_compra.csv') if per else ruta
     if os.path.exists(ruta):
         rec = pd.read_csv(ruta, dtype={'sku': str})
         fecha_ej = datetime.datetime.fromtimestamp(os.path.getmtime(ruta))

@@ -207,6 +207,8 @@ class VistaInicio(Vista):
         binf = Btn(acc, 'Informe para gerencia ▾', None, 'secondary', 'md')
         binf.set_command(lambda: app.menu_informe(binf))
         binf.pack(side='left', padx=(S(10), 0))
+        Btn(acc, 'Abrir carpeta de resultados', app.abrir_carpeta_resultados, 'ghost', 'md'
+            ).pack(side='left', padx=(S(10), 0))
 
         # ── Salud del inventario ──
         seccion(self.cont, 'Salud del inventario')
@@ -884,7 +886,7 @@ class VistaSimular(Vista):
         self.ocupado = True
         self.btn.set_text('Calculando…')
         self.btn.set_state(False)
-        carpeta = self.app.datos.carpeta
+        carpeta = self.app.datos.carpeta        # raíz de salida; la simulación usa su período más reciente
 
         def trabajo():
             from preve_orquestador import ejecutar_simulacion
@@ -937,7 +939,8 @@ class VistaSimular(Vista):
         self.app.toast('Simulación lista. Se guardó PREVE_Simulacion.xlsx', 'ok')
 
     def _abrir_excel(self):
-        self.app.abrir_archivo(os.path.join(self.app.datos.carpeta, 'PREVE_Simulacion.xlsx'))
+        self.app.abrir_archivo(os.path.join(self.app.datos.ultimo_periodo() or self.app.datos.carpeta,
+                                            'PREVE_Simulacion.xlsx'))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1185,6 +1188,42 @@ class VistaConfig(Vista):
             return
         self.app.toast('Parámetros guardados. Se aplican en el próximo análisis.', 'ok')
 
+    def _card_depurar(self):
+        """
+        Fase 8: botón para borrar toda la data histórica y empezar de cero.
+        Pensado para pruebas limpias (p. ej. backtesting de 6 meses sin arrastrar datos viejos).
+        """
+        import preve_depurar as depurar
+        card = Card(self.cont, padx=22, pady=18)
+        card.pack(fill='x', padx=S(PADX), pady=(0, S(12)))
+        top = tk.Frame(card.body, bg=SURFACE)
+        top.pack(fill='x')
+        label(top, 'Depurar datos — empezar de cero', 11, 'bold', DANGER).pack(side='left')
+        label(card.body, 'Borra todo el historial de análisis, pronósticos, métricas y reportes guardados. '
+                         'Útil para hacer una prueba limpia (por ejemplo, backtesting de 6 meses con datos '
+                         'nuevos) sin arrastrar resultados anteriores.', 9, color=TEXT_DIM,
+              wraplength=S(700), justify='left').pack(anchor='w', pady=(S(4), S(8)))
+        prev = depurar.preview_depuracion()
+        datos_info = (f'Datos actuales en memoria: '
+                      f'{len(prev["tablas_a_vaciar"])} tablas de datos, '
+                      f'{len(prev["archivos"])} archivos auxiliares, '
+                      f'{len(prev["carpetas"])} carpetas de reportes · '
+                      f'{len(prev["periodos"])} análisis guardados · '
+                      f'total: {prev["total_humano"]}')
+        label(card.body, datos_info, 9, color=TEXT_MUTED).pack(anchor='w', pady=(0, S(8)))
+        label(card.body, 'Se crea un ZIP de respaldo antes de borrar, dentro de respaldos_depurar/. '
+                         'La configuración (empresa, sucursales, ciclos, plantillas, parámetros) '
+                         'se mantiene para no repetir el asistente inicial.', 9,
+              color=TEXT_DIM, wraplength=S(700), justify='left').pack(anchor='w', pady=(0, S(10)))
+        fila = tk.Frame(card.body, bg=SURFACE)
+        fila.pack(anchor='w')
+        Btn(fila, 'Depurar datos (conservar configuración)',
+            lambda: self.app.depurar_datos(conservar_config=True),
+            'danger', 'md').pack(side='left')
+        Btn(fila, 'Borrar TODO (incluye configuración)',
+            lambda: self.app.depurar_datos(conservar_config=False),
+            'ghost', 'md').pack(side='left', padx=S(8))
+
     ATAJOS = [('Ctrl + G', 'Generar recomendación (otra vez, para ejecutar)'), ('Ctrl + S', 'Simular (otra vez, para ejecutar)'),
               ('Ctrl + K', 'Buscador global'), ('Ctrl + H', 'Historial'), ('Ctrl + R', 'Recomendaciones'),
               ('Ctrl + D', 'Decisión rápida'), ('Ctrl + I', 'Inicio'), ('← →', 'Saltar / comprar en decisión rápida')]
@@ -1229,6 +1268,7 @@ class VistaConfig(Vista):
         self._card_categorias()
         self._card_erp()
         self._card_parametros()
+        self._card_depurar()
 
         card = Card(self.cont, padx=22, pady=18)
         card.pack(fill='x', padx=S(PADX), pady=(0, S(12)))

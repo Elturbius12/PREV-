@@ -2,8 +2,8 @@
 """
 PREVÉ — Capa de datos de la interfaz.
 
-Lee lo que el pipeline ya generó (recomendacion_compra.csv, historial SQLite,
-ciclo_estado.json) y lo convierte en lo que la interfaz necesita: urgencia por
+Lee lo que el pipeline ya generó (recomendacion_compra.csv del período más reciente,
+historial SQLite, estado del ciclo) y lo convierte en lo que la interfaz necesita: urgencia por
 producto, explicación en lenguaje natural, KPIs, comparación con el análisis
 anterior y decisiones del usuario.
 
@@ -19,7 +19,7 @@ import pandas as pd
 import preve_historial as hist
 from preve_ciclo import cargar_estado_ciclo, CicloCorruptoError
 from preve_config import Config
-from preve_utils import get_logger
+from preve_utils import get_logger, ultimo_periodo as _ultimo_periodo, NOMBRE_REC_CSV
 
 logger = get_logger('datos')
 
@@ -30,6 +30,11 @@ _MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agost
 # ══════════════════════════════════════════════════════════════════
 # Parámetros de negocio (Fase 3: vienen de la configuración, ya no están fijos)
 # ══════════════════════════════════════════════════════════════════
+def ultimo_periodo_de(carpeta_salida, con_recomendacion=True):
+    """Período más reciente de una carpeta de salida cualquiera (None si no hay)."""
+    return _ultimo_periodo(carpeta_salida, NOMBRE_REC_CSV if con_recomendacion else None)
+
+
 def lead_time():
     """Lead time del ciclo principal, en días."""
     return int(Config.actual().ciclo_principal['lead_time_dias'])
@@ -262,10 +267,23 @@ def explicar(r, fecha_datos, lead=None):
 # Contenedor de datos de una sucursal
 # ══════════════════════════════════════════════════════════════════
 class Datos:
-    def __init__(self, carpeta_salida, sucursal='San José'):
+    """Datos de una sucursal. `carpeta` es la raíz de salida (ciclo, historial y órdenes abiertas viven
+    ahí); los resultados de cada análisis están en la subcarpeta de período (`carpeta_periodo`)."""
+
+    def __init__(self, carpeta_salida, sucursal='San José', periodo=None):
         self.carpeta = carpeta_salida
         self.sucursal = sucursal
+        self._periodo_fijo = periodo          # fuerza una carpeta de período concreta (p. ej. el informe)
+        self.carpeta_periodo = None
         self.recargar()
+
+    def ultimo_periodo(self, con_recomendacion=True):
+        """Ruta de la subcarpeta de período más reciente de la salida (o None si no hay ninguna).
+
+        con_recomendacion=True ignora períodos sin recomendacion_compra.csv (p. ej. un análisis que falló
+        a medias); con False cuenta cualquier carpeta de período (útil mientras un análisis está en curso).
+        """
+        return _ultimo_periodo(self.carpeta, NOMBRE_REC_CSV if con_recomendacion else None)
 
     # ── carga ──────────────────────────────────────────────
     def recargar(self):
@@ -279,10 +297,12 @@ class Datos:
         self.scorecard = None
         self.error_ciclo = None
         carpeta = self.carpeta
+        self.carpeta_periodo = None
         if not carpeta or not os.path.isdir(carpeta):
             return
-        csv_path = os.path.join(carpeta, 'recomendacion_compra.csv')
-        if os.path.exists(csv_path):
+        self.carpeta_periodo = self._periodo_fijo or self.ultimo_periodo()
+        csv_path = os.path.join(self.carpeta_periodo, NOMBRE_REC_CSV) if self.carpeta_periodo else None
+        if csv_path and os.path.exists(csv_path):
             try:
                 raw = pd.read_csv(csv_path, dtype={'sku': str})
                 self.fecha_datos = datetime.datetime.fromtimestamp(os.path.getmtime(csv_path))
@@ -459,9 +479,10 @@ class Datos:
         except SQLAlchemyError:
             # FIX: antes except Exception silencioso
             logger.exception('Búsqueda en el historial falló')
-        for base in (self.carpeta, os.path.dirname(self.carpeta or '')):
+        # Traslados: se generan en la raíz multi-sucursal (carpeta padre); también se mira el período propio
+        for base in (self.carpeta_periodo, _ultimo_periodo(os.path.dirname(self.carpeta or ''), None)):
             ruta = os.path.join(base or '', 'PREVE_Traslados_Sugeridos.csv')
-            if os.path.exists(ruta):
+            if base and os.path.exists(ruta):
                 try:
                     t = pd.read_csv(ruta, dtype={'sku': str})
                     m = (t['sku'].str.lower() + ' ' + t['nombre'].fillna('').str.lower()).str.contains(

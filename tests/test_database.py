@@ -165,6 +165,12 @@ def test_historial_importa_automaticamente_la_carpeta(carpeta_salida):
 # ══════════════════════════════════════════════════════════════════
 # Script de migración
 # ══════════════════════════════════════════════════════════════════
+def _periodo(carpeta_salida):
+    d = os.path.join(carpeta_salida, '2025-01-01_a_2025-01-14')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def test_script_migracion_conteos_coinciden(tmp_path, carpeta_salida, capsys):
     from scripts.migrar_a_sqlite import main
     _crear_historial_legado(carpeta_salida)
@@ -173,7 +179,7 @@ def test_script_migracion_conteos_coinciden(tmp_path, carpeta_salida, capsys):
                    'importaciones': [{'fecha': '2025-01-01'}, {'fecha': '2025-01-15'}]}, f)
     pd.DataFrame({'sku': ['A', 'B'], 'stock_actual': [1, 49], 'modelo_asignado': ['LightGBM', 'Croston-TSB'],
                   'demanda_p10_141d': [5, 0], 'demanda_p50_141d': [12, 1], 'demanda_p90_141d': [20, 2]}
-                 ).to_csv(os.path.join(carpeta_salida, 'recomendacion_compra.csv'), index=False)
+                 ).to_csv(os.path.join(_periodo(carpeta_salida), 'recomendacion_compra.csv'), index=False)
     pd.DataFrame({'sku': ['A'], 'cantidad': [8], 'proveedor': ['P'], 'fecha_pedido': ['2025-01-10'],
                   'fecha_estimada_llegada': ['2025-02-15'], 'estado': ['abierta']}
                  ).to_csv(os.path.join(carpeta_salida, 'ordenes_compra_abiertas.csv'), index=False)

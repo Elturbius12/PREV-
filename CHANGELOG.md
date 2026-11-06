@@ -2,6 +2,21 @@
 
 Todos los cambios relevantes de PREVÉ, organizados por fase.
 
+## [Resultados por período] — 2026-11-06
+
+### Cambiado
+- **Cada análisis guarda sus resultados en su propia subcarpeta** dentro de la carpeta de salida: `salida/AAAA-MM-DD_a_AAAA-MM-DD/`. El período termina en la fecha de los datos importados y dura `dias_entre_importaciones` días (si no se puede determinar la fecha, se usa la de hoy). Ahí quedan `recomendacion_compra*.csv`, `skus_sin_pronostico.csv`, los `PREVE_*.xlsx`/`.csv`, el scorecard, el informe (Word/PDF) y `dashboard.html`. Repetir el análisis sobre los mismos datos reutiliza la misma carpeta.
+- **Lo que no es resultado se queda en la raíz de salida:** `ordenes_compra_abiertas.csv` (lo editas a mano) y el respaldo `ciclo_estado.json`. El estado del ciclo sigue en la base de datos.
+- **La app lee siempre el período más reciente** que tenga recomendación (un análisis que falló a medias no oculta el anterior): recomendaciones, informe, simulación, traslados.
+- **La validación (scorecard) lee directo del período anterior.** Ya no se escriben `recomendacion_anterior.csv` ni `recomendacion_anterior_meta.json`; si existen de versiones antiguas y no hay período anterior, se usan una vez como referencia.
+- **Depurar datos** ahora también borra las subcarpetas de período de las carpetas de salida de las sucursales (y las de `salida/<Sucursal>/` en modo multi-sucursal), con respaldo en el ZIP. No toca ningún otro archivo ni carpeta. `preview_depuracion()` agrega la clave `periodos`.
+
+### Migración
+- Los archivos sueltos que ya tenías en la raíz de salida **no se mueven ni se borran**: quedan huérfanos y puedes borrarlos a mano. A partir de esta versión todo análisis nuevo crea su subcarpeta.
+
+### Tests
+- `tests/test_periodos.py` (períodos, `ultimo_periodo`, depuración y pipeline completo) y ajustes a los tests de validación y migración.
+
 ## [Fase 7] — 2026-11-05 · Limpieza, logging, tests y documentación
 
 ### Corregido

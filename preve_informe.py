@@ -123,9 +123,12 @@ def _graficos(d, rec, carpeta_tmp):
     return out
 
 
-def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None):
-    """Arma la lista de bloques del informe. Devuelve (meta, bloques)."""
-    d = dt.Datos(carpeta_salida, sucursal)
+def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None, carpeta_periodo=None):
+    """Arma la lista de bloques del informe. Devuelve (meta, bloques).
+
+    Lee del período indicado (por defecto, el más reciente de `carpeta_salida`).
+    """
+    d = dt.Datos(carpeta_salida, sucursal, periodo=carpeta_periodo)
     if not d.tiene_datos:
         raise RuntimeError('No hay una recomendación generada para armar el informe.')
     k = d.kpis()
@@ -143,7 +146,7 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None):
     urg = rec[rec['urgencia'] == 'URGENTE']
     inv_urg = float(urg['costo_total_compra_pen'].sum()) if len(urg) else 0.0
     sin_pron = 0
-    ruta_sp = os.path.join(carpeta_salida, 'skus_sin_pronostico.csv')
+    ruta_sp = os.path.join(d.carpeta_periodo, 'skus_sin_pronostico.csv')
     if os.path.exists(ruta_sp):
         try:
             sin_pron = len(pd.read_csv(ruta_sp))
@@ -634,16 +637,23 @@ def _escribir_pdf(meta, B, ruta):
 # ══════════════════════════════════════════════════════════════════
 # 4) API
 # ══════════════════════════════════════════════════════════════════
-def generar_informe(carpeta_salida, sucursal='San José', formatos=('docx', 'pdf'), log=log_info):
-    """Genera el informe y devuelve {'docx': ruta, 'pdf': ruta} con lo que se pudo escribir."""
+def generar_informe(carpeta_salida, sucursal='San José', formatos=('docx', 'pdf'), log=log_info,
+                    carpeta_periodo=None):
+    """Genera el informe dentro de la carpeta del período y devuelve {'docx': ruta, 'pdf': ruta}.
+
+    carpeta_periodo: período a usar; si se omite, el más reciente de `carpeta_salida`.
+    """
     tmp = tempfile.mkdtemp(prefix='preve_informe_')
     resultado = {}
     try:
-        meta, bloques = construir_contenido(carpeta_salida, sucursal, tmp)
+        carpeta_periodo = carpeta_periodo or dt.Datos(carpeta_salida, sucursal).carpeta_periodo
+        if not carpeta_periodo:
+            raise RuntimeError('No hay una recomendación generada para armar el informe.')
+        meta, bloques = construir_contenido(carpeta_salida, sucursal, tmp, carpeta_periodo)
         for fmt, nombre, fn in (('docx', NOMBRE_DOCX, _escribir_docx), ('pdf', NOMBRE_PDF, _escribir_pdf)):
             if fmt not in formatos:
                 continue
-            ruta = os.path.join(carpeta_salida, nombre)
+            ruta = os.path.join(carpeta_periodo, nombre)
             try:
                 fn(meta, bloques, ruta)
                 resultado[fmt] = ruta

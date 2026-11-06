@@ -38,6 +38,13 @@ echo "Instalando librerías..."
 echo "Preparando la base de datos..."
 "$VPY" scripts/migrar_a_sqlite.py || echo "Aviso: la migración reportó diferencias; PREVÉ igual puede abrirse."
 
+# 4b. Navegador de Playwright (solo hace falta si usas "Descargar desde Negosy").
+#     pip instala la librería pero NO el navegador: hay que descargarlo aparte, una sola vez.
+if [ ! -d "$HOME/.cache/ms-playwright" ]; then
+    echo "Descargando el navegador para la integración con Negosy (una sola vez, puede tardar unos minutos)..."
+    "$VPY" -m playwright install chromium || echo "Aviso: no se pudo descargar el navegador de Playwright. \"Descargar desde Negosy\" no funcionará hasta correr: $VPY -m playwright install chromium"
+fi
+
 # 5. Iniciar
 echo "Abriendo PREVÉ..."
 exec "$VPY" preve_app.py

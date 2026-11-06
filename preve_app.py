@@ -63,14 +63,12 @@ FRASES_CARGA = [
 
     # — Datos curiosos del comercio —
     '🌎 ¿Sabías que? Walmart, la tienda más grande del mundo, empezó como una sola tienda en Arkansas en 1962.',
-    '🌎 ¿Sabías que? El comercio internacional mueve más de 25 billones de dólares al año.',
-    '🌎 ¿Sabías que? Perú importa más de US$ 50,000 millones al año. Las importaciones impulsan miles de negocios como el tuyo.',
+    # FIX (usabilidad): se quitó "25 billones" (dato impreciso; el comercio global está sobre US$ 33 billones en 2024).
     '🌎 ¿Sabías que? El concepto de "código de barras" se inventó en 1952, pero no se usó comercialmente hasta 1974.',
     '🌎 ¿Sabías que? Amazon empezó vendiendo solo libros desde un garaje. Hoy es la tienda más grande del mundo online.',
     '🌎 ¿Sabías que? El método ABC de inventarios se basa en el principio de Pareto: el 20% de tus productos genera el 80% de tu ganancia.',
     '🌎 ¿Sabías que? La primera tienda por departamentos del mundo fue Le Bon Marché, abierta en París en 1838.',
-    '🌎 ¿Sabías que? Juliaca es uno de los principales centros comerciales del sur del Perú, con un comercio que mueve millones cada día.',
-    '🌎 ¿Sabías que? Las importaciones de autopartes en Perú crecen cada año. Es un mercado con mucho potencial.',
+    # FIX (usabilidad): se quitaron las frases hardcodeadas de Juliaca y de autopartes, que no aplican a cualquier empresa.
 
     # — Motivación para el usuario —
     '🚀 Cada vez que usas datos para decidir qué comprar, le llevas ventaja a tu competencia.',
@@ -405,8 +403,7 @@ class Paleta:
         for t in res['traslados']:
             self.items.append(dict(grupo='En traslados', titulo=str(t.get('nombre', t['sku'])),
                                    sub=f'{t["cantidad"]} u · {t["desde"]} → {t["hacia"]}',
-                                   go=lambda: self.app.abrir_archivo(os.path.join(
-                                       os.path.dirname(self.app.datos.carpeta), 'PREVE_Traslados_Sugeridos.csv'))))
+                                   go=lambda: self.app.abrir_traslados()))
         self._pintar()
 
     def _mover(self, d):
@@ -458,7 +455,8 @@ SOLO_EN_BACKTESTING = {'backtesting'}
 
 NAV = [('inicio', 'Inicio', '⌂'), ('generar', 'Generar', '▶'), ('recom', 'Recomendaciones', '☰'),
        ('decision', 'Decisión rápida', '⚡'), ('simular', 'Simular', '◐'), ('historial', 'Historial', '↺'),
-       ('backtesting', 'Backtesting', '⟲'),
+       # FIX (usabilidad): etiqueta en lenguaje común en vez de "Backtesting"
+       ('backtesting', 'Probar qué tan bien acierta PREVÉ', '⟲'),
        ('config', 'Configuración', '⚙')]
 
 
@@ -753,6 +751,58 @@ class PreveApp:
         self.btn_usuario.set_text(f'{nombre} ▾')
         self.toast('Nombre guardado', 'ok')
 
+    # ── Fase 8: depurar datos (empezar de cero para pruebas limpias) ──
+    def depurar_datos(self, conservar_config=True):
+        """
+        Borra toda la data histórica (ventas, pronósticos, métricas, reportes
+        generados, logs). Antes empaqueta todo en un ZIP de respaldo. La
+        configuración (empresa, sucursales, ciclos, plantillas, parámetros)
+        se conserva por defecto.
+        """
+        from tkinter import messagebox
+        import preve_depurar as depurar
+        prev = depurar.preview_depuracion()
+        titulo = 'Depurar datos — ¿empezar de cero?'
+        detalle = [
+            'Se BORRARÁ:',
+            f'  · {len(prev["archivos"])} archivos ({depurar._humano(sum(a["bytes"] for a in prev["archivos"]))})',
+            f'  · {len(prev["carpetas"])} carpetas ({depurar._humano(sum(c["bytes"] for c in prev["carpetas"]))})',
+            f'  · {len(prev["periodos"])} análisis guardados en las carpetas de resultados '
+            f'({depurar._humano(sum(c["bytes"] for c in prev["periodos"]))}); '
+            f'ordenes_compra_abiertas.csv y tus otros archivos no se tocan',
+            f'  · {len(prev["tablas_a_vaciar"])} tablas de datos de la base',
+            '',
+            'Se CONSERVA:' if conservar_config else 'No se conservará nada (empezar completamente de cero).',
+        ]
+        if conservar_config:
+            detalle.append(f'  · Configuración: empresa, sucursales, ciclos, plantillas, parámetros, usuario')
+            detalle.append(f'  · ({len(prev["tablas_a_conservar"])} tablas de configuración intactas)')
+        detalle.extend([
+            '',
+            'Antes de borrar se creará un ZIP de respaldo en respaldos_depurar/.',
+            'Esta acción NO se puede deshacer (sólo restaurando el ZIP a mano).',
+            '',
+            '¿Continuar?',
+        ])
+        if not messagebox.askyesno(titulo, '\n'.join(detalle), icon='warning', parent=self.root):
+            return
+        try:
+            reporte = depurar.depurar_datos(conservar_config=conservar_config, hacer_respaldo=True)
+        except (OSError, RuntimeError) as e:
+            logger.error('Error depurando datos', exc_info=True)
+            self.toast(f'No se pudo depurar: {e}', 'error')
+            return
+        resumen = depurar.resumen_para_usuario(reporte)
+        logger.info('Depuración completada: %s', resumen)
+        # Forzar recarga completa
+        dt.Config.actual().invalidar()
+        self.cfg = dt.cargar_config()
+        self.recargar_datos()
+        self.refrescar()
+        messagebox.showinfo('Depurar datos — completado',
+                            f'{resumen}\n\nAhora puedes importar datos nuevos para tu prueba de 6 meses.',
+                            parent=self.root)
+
     # ── datos / carpetas ───────────────────────────────────
     def carpeta(self, clave):
         return self.cfg['sucursales'].setdefault(self.sucursal, {'entrada': '', 'salida': ''}).get(clave, '')
@@ -784,6 +834,7 @@ class PreveApp:
         m.add_command(label='Abrir informe en PDF', command=lambda: self.informe('pdf'))
         m.add_command(label='Abrir informe en Word', command=lambda: self.informe('docx'))
         m.add_separator()
+        m.add_command(label='Abrir carpeta de resultados', command=self.abrir_carpeta_resultados)
         m.add_command(label='Actualizar informe (incluye tus decisiones)', command=lambda: self.informe(None))
         m.tk_popup(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
 
@@ -816,6 +867,24 @@ class PreveApp:
             else:
                 self.toast('Informe actualizado (PDF y Word).', 'ok')
         self.en_segundo_plano(trabajo, listo)
+
+    def abrir_traslados(self):
+        """Abre PREVE_Traslados_Sugeridos.csv del período más reciente (en la raíz multi-sucursal)."""
+        raiz = os.path.dirname(self.datos.carpeta or '')
+        for base in (dt.ultimo_periodo_de(raiz, False), self.datos.carpeta_periodo):
+            ruta = os.path.join(base or '', 'PREVE_Traslados_Sugeridos.csv')
+            if base and os.path.exists(ruta):
+                self.abrir_archivo(ruta)
+                return
+        self.toast('Todavía no hay traslados sugeridos.', 'warn')
+
+    def abrir_carpeta_resultados(self):
+        """Abre la carpeta del período más reciente (no la raíz de salida)."""
+        carpeta = self.datos.carpeta_periodo or self.datos.ultimo_periodo(False)
+        if not carpeta or not os.path.isdir(carpeta):
+            self.toast('Todavía no hay resultados: genera una recomendación primero.', 'warn')
+            return
+        self.abrir_archivo(carpeta)
 
     def abrir_archivo(self, path):
         if not os.path.exists(path):
