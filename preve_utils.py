@@ -102,3 +102,68 @@ def fin_de_periodo(ruta_periodo):
         return datetime.date.fromisoformat(nombre.split('_a_')[1])
     except ValueError:
         return None
+
+
+def _a_fecha(f):
+    """datetime / date / Timestamp / 'AAAA-MM-DD' → datetime.date."""
+    import datetime
+    if isinstance(f, datetime.datetime):
+        return f.date()
+    if isinstance(f, datetime.date):
+        return f
+    return datetime.date.fromisoformat(str(f)[:10])
+
+
+def nombre_periodo(inicio, fin):
+    """Nombre de carpeta de período: 'AAAA-MM-DD_a_AAAA-MM-DD'. Lo usan la salida y la entrada."""
+    return f'{_a_fecha(inicio).isoformat()}_a_{_a_fecha(fin).isoformat()}'
+
+
+# ══════════════════════════════════════════════════════════════════
+# Períodos de ENTRADA (descargas automáticas desde el ERP)
+# ══════════════════════════════════════════════════════════════════
+MARCADOR_DESCARGA = '.descarga_completa'
+DIAS_PRIMERA_CARGA = 730
+
+
+def marcar_descarga_completa(ruta_periodo):
+    """Deja el marcador que indica que la descarga de ese período terminó bien."""
+    import os
+    with open(os.path.join(ruta_periodo, MARCADOR_DESCARGA), 'w', encoding='utf-8') as f:
+        f.write('ok\n')
+
+
+def quitar_marca_descarga(ruta_periodo):
+    """Quita el marcador (al empezar a reintentar un período, hasta que termine bien)."""
+    import os
+    try:
+        os.remove(os.path.join(ruta_periodo, MARCADOR_DESCARGA))
+    except FileNotFoundError:
+        pass
+
+
+def periodos_importados(carpeta_entrada):
+    """Períodos de entrada con descarga completa, del más antiguo al más reciente.
+    Un período a medias (sin marcador) no cuenta como importado."""
+    return listar_periodos(carpeta_entrada, MARCADOR_DESCARGA)
+
+
+def ultimo_periodo_importado(carpeta_entrada):
+    """Ruta del último período de entrada con descarga completa (o None)."""
+    rutas = periodos_importados(carpeta_entrada)
+    return rutas[-1] if rutas else None
+
+
+def rango_descarga(carpeta_entrada, hoy=None):
+    """(inicio, fin) de la próxima descarga automática, o None si ya está todo al día.
+
+    El fin es siempre AYER (el día en curso aún no terminó de registrarse). Sin período previo es la
+    primera carga histórica: DIAS_PRIMERA_CARGA días. Con período previo: desde el día siguiente a su fin.
+    """
+    import datetime
+    hoy = _a_fecha(hoy) if hoy is not None else datetime.date.today()
+    fin = hoy - datetime.timedelta(days=1)
+    previo = ultimo_periodo_importado(carpeta_entrada)
+    fin_previo = fin_de_periodo(previo) if previo else None
+    inicio = fin_previo + datetime.timedelta(days=1) if fin_previo else hoy - datetime.timedelta(days=DIAS_PRIMERA_CARGA)
+    return (inicio, fin) if inicio <= fin else None

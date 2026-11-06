@@ -36,7 +36,7 @@ import sys
 if __package__ in (None, ''):          # ejecutado como script: que encuentre los módulos de la app
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from preve_utils import get_logger, log_info  # noqa: E402
+from preve_utils import get_logger, log_info, nombre_periodo  # noqa: E402
 
 try:
     from dotenv import load_dotenv
@@ -47,16 +47,19 @@ except ImportError:  # python-dotenv es opcional; sin él se leen variables del 
 logger = get_logger('extractor')
 
 
-def carpeta_descarga(base):
-    """Crea y devuelve <base>/YYYY-MM-DD_HH-MM-SS para una extracción."""
-    ruta = os.path.join(base, datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
+def carpeta_descarga(base, inicio, fin):
+    """Crea (o reutiliza) <base>/AAAA-MM-DD_a_AAAA-MM-DD con las fechas de los DATOS que se descargan.
+
+    Repetir la descarga del mismo período reutiliza la carpeta y sobrescribe sus archivos.
+    """
+    ruta = os.path.join(base, nombre_periodo(inicio, fin))
     os.makedirs(ruta, exist_ok=True)
     return ruta
 
 # ---------------------------------------------------------------------------
-# Configuración de tiendas
+# Configuración de tiendas (valores de FÁBRICA; los que se usan de verdad vienen de Config, ver tiendas.py)
 # ---------------------------------------------------------------------------
-TIENDAS = {
+TIENDAS_DEFECTO = {
     'san_jose': {
         'nombre': 'SAN JOSE JULIACA',
         'base_url': 'https://storeyuju.negosy.com',
@@ -74,7 +77,10 @@ TIENDAS = {
     },
 }
 
-LOGIN_URL = 'https://app.negosy.com/accounts/login/'
+TIENDAS = TIENDAS_DEFECTO          # alias de compatibilidad (preve_extractor.py y scripts antiguos)
+
+LOGIN_URL_DEFECTO = 'https://app.negosy.com/accounts/login/'
+LOGIN_URL = LOGIN_URL_DEFECTO
 COMPANIES_URL = 'https://app.negosy.com/companies/'
 
 # Tiempo máximo de espera para archivos celery (segundos)
@@ -127,10 +133,10 @@ def _url_movimientos_salidas(base, fecha_inicio, fecha_fin):
 # ---------------------------------------------------------------------------
 # Motor de extracción con Playwright
 # ---------------------------------------------------------------------------
-async def _login(page, usuario, contrasena, log):
+async def _login(page, usuario, contrasena, log, login_url=LOGIN_URL_DEFECTO):
     """Hace login en Negosy y espera la página de selección de empresa."""
     log('Navegando al login de Negosy...')
-    await page.goto(LOGIN_URL, wait_until='networkidle', timeout=30000)
+    await page.goto(login_url, wait_until='networkidle', timeout=30000)
     await page.wait_for_timeout(1000)
 
     # Llenar formulario de login
@@ -141,9 +147,9 @@ async def _login(page, usuario, contrasena, log):
     log('Login exitoso.')
 
 
-async def _seleccionar_tienda(page, tienda_key, log):
+async def _seleccionar_tienda(page, tienda_key, log, tiendas=None):
     """Selecciona una tienda desde la página de empresas."""
-    tienda = TIENDAS[tienda_key]
+    tienda = (tiendas or TIENDAS_DEFECTO)[tienda_key]
     log(f'Seleccionando tienda: {tienda["nombre"]}...')
     await page.goto(COMPANIES_URL, wait_until='networkidle', timeout=30000)
     await page.wait_for_timeout(1500)
@@ -452,9 +458,9 @@ async def _descargar_celery(page, url, destino, nombre_archivo, log):
 
 
 async def _extraer_tienda(page, tienda_key, base_url, carpeta_destino,
-                          fecha_inicio, fecha_fin, log):
-    """Extrae los 5 reportes de una tienda."""
-    tienda = TIENDAS[tienda_key]
+                          fecha_inicio, fecha_fin, log, tiendas=None, con_listado=True):
+    """Extrae los reportes de una tienda (con_listado=False salta el catálogo: lo resuelve quien llama)."""
+    tienda = (tiendas or TIENDAS_DEFECTO)[tienda_key]
     prefijo = tienda_key  # san_jose, santa_barbara, principal
     hoy = datetime.now().strftime('%Y%m%d')
 
@@ -466,13 +472,14 @@ async def _extraer_tienda(page, tienda_key, base_url, carpeta_destino,
     archivos = []
 
     # 1. Listado de productos (síncrono)
-    url1 = _url_listado_productos(base_url)
-    nombre1 = f'listado_productos_{prefijo}_{hoy}.xlsx'
-    try:
-        ruta = await _descargar_sincrono(page, url1, carpeta_destino, nombre1, log)
-        archivos.append(ruta)
-    except Exception as e:
-        log(f'  ✗ Error en listado de productos: {e}')
+    if con_listado:
+        url1 = _url_listado_productos(base_url)
+        nombre1 = f'listado_productos_{prefijo}_{hoy}.xlsx'
+        try:
+            ruta = await _descargar_sincrono(page, url1, carpeta_destino, nombre1, log)
+            archivos.append(ruta)
+        except Exception as e:
+            log(f'  ✗ Error en listado de productos: {e}')
 
     # 2. Ventas por producto (celery)
     url2 = _url_ventas_producto(base_url, fecha_inicio, fecha_fin)
@@ -510,7 +517,8 @@ async def _extraer_tienda(page, tienda_key, base_url, carpeta_destino,
     except Exception as e:
         log(f'  ✗ Error en movimientos salidas: {e}')
 
-    log(f'\n{tienda["nombre"]}: {len(archivos)}/5 archivos descargados correctamente.')
+    esperado = 5 if con_listado else 4
+    log(f'\n{tienda["nombre"]}: {len(archivos)}/{esperado} archivos descargados correctamente.')
     return archivos
 
 
@@ -519,7 +527,8 @@ async def _extraer_tienda(page, tienda_key, base_url, carpeta_destino,
 # ---------------------------------------------------------------------------
 async def extraer_datos_async(carpeta_destino, usuario, contrasena,
                                tiendas=None, fecha_inicio=None, fecha_fin=None,
-                               headless=True, log=log_info, crear_subcarpeta=True):
+                               headless=True, log=log_info, crear_subcarpeta=True,
+                               login_url=None, tiendas_config=None, tiendas_sin_listado=()):
     """Extrae datos de Negosy para las tiendas especificadas.
 
     Args:
@@ -532,6 +541,9 @@ async def extraer_datos_async(carpeta_destino, usuario, contrasena,
         fecha_fin: datetime, fin del rango de datos (por defecto: hoy).
         headless: Si True, el navegador no muestra ventana visible.
         log: Función de logging (por defecto: print).
+        login_url: URL de inicio de sesión (por defecto la de fábrica; el plugin pasa la de Config).
+        tiendas_config: {clave: {nombre, base_url, selector_texto}} (por defecto TIENDAS_DEFECTO).
+        tiendas_sin_listado: claves de tienda cuyo catálogo NO se descarga (ya lo resolvió quien llama).
 
     Returns:
         dict con {tienda_key: [lista de rutas de archivos descargados]}
@@ -541,15 +553,18 @@ async def extraer_datos_async(carpeta_destino, usuario, contrasena,
     if tiendas is None:
         tiendas = ['san_jose']
 
+    login_url = login_url or LOGIN_URL_DEFECTO
+    tiendas_cfg = tiendas_config or TIENDAS_DEFECTO
+    # Sin fechas explícitas: hasta AYER (el día en curso aún no terminó de registrarse); 2 años de historia.
+    # Quien automatiza (NegosyPlugin) calcula el rango según el último período importado.
     if fecha_fin is None:
-        fecha_fin = datetime.now()
+        fecha_fin = datetime.now() - timedelta(days=1)
     if fecha_inicio is None:
-        fecha_inicio = fecha_fin - timedelta(days=730)  # 2 años
+        fecha_inicio = fecha_fin - timedelta(days=729)  # 2 años
 
-    # FIX: cada extracción va a su propia subcarpeta con fecha y hora; antes todas se mezclaban en
-    # la misma carpeta y las descargas de días distintos se solapaban
+    # Cada extracción va a la subcarpeta de su período de datos (AAAA-MM-DD_a_AAAA-MM-DD)
     if crear_subcarpeta:
-        carpeta_destino = carpeta_descarga(carpeta_destino)
+        carpeta_destino = carpeta_descarga(carpeta_destino, fecha_inicio, fecha_fin)
     else:
         os.makedirs(carpeta_destino, exist_ok=True)
     log(f'Guardando esta descarga en: {carpeta_destino}')
@@ -565,18 +580,19 @@ async def extraer_datos_async(carpeta_destino, usuario, contrasena,
 
         try:
             # Login una sola vez
-            await _login(page, usuario, contrasena, log)
+            await _login(page, usuario, contrasena, log, login_url)
 
             # Extraer datos de cada tienda
             for tienda_key in tiendas:
-                if tienda_key not in TIENDAS:
+                if tienda_key not in tiendas_cfg:
                     log(f'⚠ Tienda "{tienda_key}" no reconocida, se omite.')
                     continue
 
-                await _seleccionar_tienda(page, tienda_key, log)
+                await _seleccionar_tienda(page, tienda_key, log, tiendas_cfg)
                 archivos = await _extraer_tienda(
-                    page, tienda_key, TIENDAS[tienda_key]['base_url'],
-                    carpeta_destino, fecha_inicio, fecha_fin, log)
+                    page, tienda_key, tiendas_cfg[tienda_key]['base_url'],
+                    carpeta_destino, fecha_inicio, fecha_fin, log, tiendas_cfg,
+                    con_listado=tienda_key not in tiendas_sin_listado)
                 resultado[tienda_key] = archivos
 
         finally:
@@ -586,10 +602,10 @@ async def extraer_datos_async(carpeta_destino, usuario, contrasena,
     log(f'\n{"="*60}')
     log('EXTRACCIÓN COMPLETADA')
     total = sum(len(v) for v in resultado.values())
-    esperado = len(tiendas) * 5
+    esperado = sum(5 - (tk in tiendas_sin_listado) for tk in resultado)
     log(f'Archivos descargados: {total}/{esperado}')
     for tk, archivos in resultado.items():
-        log(f'  {TIENDAS[tk]["nombre"]}: {len(archivos)}/5')
+        log(f'  {tiendas_cfg[tk]["nombre"]}: {len(archivos)}/{5 - (tk in tiendas_sin_listado)}')
     log(f'Carpeta de destino: {carpeta_destino}')
     log(f'{"="*60}')
 
@@ -651,7 +667,7 @@ def main():
                         default=['san_jose'],
                         help='Tienda(s) a extraer (default: san_jose)')
     parser.add_argument('--inicio', help='Fecha inicio YYYY-MM-DD (default: 2 años atrás)')
-    parser.add_argument('--fin', help='Fecha fin YYYY-MM-DD (default: hoy)')
+    parser.add_argument('--fin', help='Fecha fin YYYY-MM-DD (default: ayer)')
     parser.add_argument('--visible', action='store_true',
                         help='Mostrar ventana del navegador (default: oculto)')
     parser.add_argument('--usuario', '-u', help='Usuario de Negosy')

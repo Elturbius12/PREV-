@@ -33,8 +33,9 @@ class PluginERP(ABC):
         return {}
 
     @abstractmethod
-    def extraer(self, carpeta_destino, opciones=None, log=log_info):
-        """Descarga los reportes. Devuelve la carpeta donde quedaron (debe ser legible por el pipeline)."""
+    def extraer(self, carpeta_destino, opciones=None, log=log_info, sucursal=None):
+        """Descarga los reportes de `sucursal`. Devuelve la carpeta donde quedaron (debe ser legible por el
+        pipeline), o None si no hay nada nuevo que descargar."""
 
 
 _REGISTRO = {}

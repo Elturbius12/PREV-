@@ -516,10 +516,13 @@ class PreveApp:
             if err:
                 self.toast(f'No se pudo descargar desde {plugin.nombre}: {err}', 'error')
                 return
+            if not carpeta:
+                self.toast('Ya tienes los datos hasta ayer: no hay nada nuevo que descargar.', 'info')
+                return
             self.toast(f'Reportes descargados en {os.path.basename(carpeta)}. Ya puedes generar.', 'ok')
             if self.nombre_actual == 'generar':
                 self.refrescar()
-        self.en_segundo_plano(lambda: plugin.extraer(destino, opciones, log=logger.info), listo)
+        self.en_segundo_plano(lambda: plugin.extraer(destino, opciones, log=logger.info, sucursal=self.sucursal), listo)
 
     def abrir_asistente(self, paso=0):
         from preve_wizard import Asistente

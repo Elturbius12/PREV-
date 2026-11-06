@@ -172,9 +172,14 @@ def test_plugin_negosy_exige_credenciales_y_usa_subcarpeta(tmp_path, monkeypatch
     monkeypatch.setenv('NEGOSY_USUARIO', 'u')
     monkeypatch.setenv('NEGOSY_CONTRASENA', 'c')
     monkeypatch.setattr(ext, 'extraer_datos', lambda carpeta, u, c, **kw: llamadas.update(carpeta=carpeta, **kw))
-    carpeta = p.extraer(str(tmp_path), {'tiendas': ['lima']})
-    assert os.path.dirname(carpeta) == str(tmp_path) and llamadas['carpeta'] == carpeta
-    assert llamadas['tiendas'] == ['lima'] and llamadas['crear_subcarpeta'] is False
+    from preve_config import Config
+    Config.actual().guardar_sucursales([{'nombre': 'Lima', 'almacenes': ['YUJU STORE PRINCIPAL'], 'activa': True}])
+    with pytest.raises(RuntimeError, match='incompleta'):      # el extractor falso no dejó archivos: no se marca
+        p.extraer(str(tmp_path), {'tiendas': ['principal']})
+    assert llamadas['tiendas'] == ['principal'] and llamadas['crear_subcarpeta'] is False
+    from preve_utils import es_carpeta_periodo
+    assert os.path.dirname(llamadas['carpeta']) == str(tmp_path)
+    assert es_carpeta_periodo(os.path.basename(llamadas['carpeta']))
 
 
 def test_alias_preve_extractor_sigue_funcionando():

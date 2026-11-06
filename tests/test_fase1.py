@@ -58,13 +58,14 @@ def test_1_1_lineas_identicas_del_mismo_archivo_se_conservan():
     assert len(deduplicar_entre_archivos([f, f.copy()])) == 2
 
 
-def test_1_1_extractor_usa_subcarpeta_con_timestamp(tmp_path):
+def test_1_1_extractor_usa_subcarpeta_de_periodo(tmp_path):
+    """Fase 10: la descarga va a AAAA-MM-DD_a_AAAA-MM-DD (fechas de los datos), no a la hora de la descarga."""
+    import datetime
     from preve_extractor import carpeta_descarga
-    ruta = carpeta_descarga(str(tmp_path))
-    import re
+    ruta = carpeta_descarga(str(tmp_path), datetime.date(2025, 1, 1), datetime.date(2025, 1, 14))
     assert os.path.dirname(ruta) == str(tmp_path)
     assert os.path.isdir(ruta)
-    assert re.fullmatch(r'\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}', os.path.basename(ruta))
+    assert os.path.basename(ruta) == '2025-01-01_a_2025-01-14'
 
 
 # ══════════════════════════════════════════════════════════════════

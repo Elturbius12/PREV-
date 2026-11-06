@@ -16,7 +16,7 @@ from preve_config import Config
 from preve_validacion import generar_scorecard
 from preve_historial import registrar_ejecucion
 from preve_simulacion import simular, generar_excel_simulacion
-from preve_utils import (get_logger, log_info, listar_periodos, fin_de_periodo, NOMBRE_REC_CSV)
+from preve_utils import (get_logger, log_info, listar_periodos, fin_de_periodo, nombre_periodo, NOMBRE_REC_CSV)
 from database import slug
 
 logger = get_logger('orquestador')
@@ -29,9 +29,7 @@ _COLS_DEMANDA = ('demanda_p50_141d', 'demanda_p10_141d', 'demanda_p90_141d')
 
 def carpeta_periodo(carpeta_salida, fecha_inicio, fecha_fin):
     """Ruta `salida/AAAA-MM-DD_a_AAAA-MM-DD` (se crea si no existe)."""
-    def _iso(f):
-        return pd.Timestamp(f).date().isoformat()
-    ruta = os.path.join(carpeta_salida, f'{_iso(fecha_inicio)}_a_{_iso(fecha_fin)}')
+    ruta = os.path.join(carpeta_salida, nombre_periodo(fecha_inicio, fecha_fin))
     os.makedirs(ruta, exist_ok=True)
     return ruta
 

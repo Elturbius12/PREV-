@@ -2,6 +2,18 @@
 
 Todos los cambios relevantes de PREVÉ, organizados por fase.
 
+## [Fase 10] — 2026-11-06 · Negosy configurable y descargas incrementales
+
+### Cambiado
+- **URL de login, URL base y texto de la tarjeta de cada tienda** ya no están fijos en el código: se editan en Configuración › Integración con tu ERP (claves `negosy_login_url` y `negosy_tienda:<sucursal>`). Los valores de fábrica (`TIENDAS_DEFECTO`, `LOGIN_URL_DEFECTO`) se usan si no guardas nada: San José → «SAN JOSE JULIACA», Santa Bárbara → «SANTA BARBARA», Lima → tienda «principal». Una sucursal nueva usa su nombre como texto de la tarjeta y necesita que escribas su URL base.
+- **Usuario y contraseña de Negosy** se pueden guardar desde la interfaz (sin cifrar en la base local, igual de confiable que el `.env`). Si hay en ambos lados, gana lo guardado en Configuración; el `.env` sigue funcionando.
+- **Rango de fechas automático:** la primera descarga trae 730 días; las siguientes, desde el día siguiente al último período importado **hasta ayer** (el día en curso aún no termina de registrarse). Si ya estás al día, no descarga nada.
+- **Cada descarga va a `entrada/AAAA-MM-DD_a_AAAA-MM-DD`** (fechas de los datos, mismo formato que la salida, `preve_utils.nombre_periodo`). Repetir el mismo período reutiliza la carpeta. Un período solo cuenta como importado cuando la descarga terminó bien (archivo `.descarga_completa`); una descarga incompleta avisa y se reintenta sobre la misma carpeta.
+- **Catálogo:** se descarga siempre por defecto (de él sale el stock). Desmarcar «Actualizar el catálogo» copia el último catálogo importado (solo para pruebas: el stock queda con la fecha de ese catálogo).
+
+### Tests
+- `tests/test_fase10.py`; ajustes en `test_fase1` y `test_fase4` (nuevo formato de carpeta de descarga).
+
 ## [Resultados por período] — 2026-11-06
 
 ### Cambiado

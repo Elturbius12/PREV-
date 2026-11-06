@@ -5,7 +5,7 @@ Se mantiene para no romper `python preve_extractor.py ...` ni `from preve_extrac
 """
 from plugins.negosy.extractor import *  # noqa: F401,F403
 from plugins.negosy.extractor import (  # noqa: F401  (nombres usados por tests y scripts)
-    TIENDAS, boton_modal_permitido, carpeta_descarga, extraer_datos, extraer_download_url, main,
+    TIENDAS, TIENDAS_DEFECTO, boton_modal_permitido, carpeta_descarga, extraer_datos, extraer_download_url, main,
 )
 
 if __name__ == '__main__':

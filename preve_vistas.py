@@ -346,7 +346,8 @@ class VistaGenerar(Vista):
             Btn(fila, f'Descargar desde {plugin.nombre}', app.descargar_desde_erp, 'soft', 'md').pack(
                 side='left', padx=(S(10), 0))
             if not plugin.credenciales_completas():
-                label(card.body, f'⚠ Faltan las credenciales de {plugin.nombre} en el archivo .env.', 9,
+                label(card.body, f'⚠ Faltan las credenciales de {plugin.nombre}: guárdalas en Configuración › '
+                                 'Integración con tu ERP (o en el archivo .env).', 9,
                       color=WARN).pack(anchor='w', pady=(S(6), 0))
 
     def _elegir(self, clave):
@@ -1141,6 +1142,59 @@ class VistaConfig(Vista):
         if actual in plugins:
             label(card.body, plugins[actual].descripcion, 9, color=TEXT_MUTED, wraplength=S(700),
                   justify='left').pack(anchor='w', pady=(S(6), 0))
+        if actual == 'negosy' and actual in plugins:
+            self._negosy_ajustes(card.body, plugins[actual])
+
+    def _negosy_ajustes(self, cuerpo, plugin):
+        """Fase 10: URLs, credenciales y catálogo de Negosy, editables (antes fijos en el código / en .env)."""
+        from plugins.negosy.tiendas import tiendas_configuradas, guardar_ajustes
+        from preve_config import ConfigError
+        cfg = dt.Config.actual()
+        tiendas = tiendas_configuradas(cfg)
+        label(cuerpo, 'AJUSTES DE NEGOSY', 8, 'bold', TEXT_MUTED).pack(anchor='w', pady=(S(14), S(4)))
+        v_login = tk.StringVar(value=cfg.get('negosy_login_url'))
+        v_user = tk.StringVar(value=cfg.get('negosy_usuario'))
+        v_pass = tk.StringVar(value=cfg.get('negosy_contrasena'))
+        v_cat = tk.BooleanVar(value=bool(cfg.get('negosy_actualizar_catalogo')))
+        v_base = {t['codigo']: tk.StringVar(value=t['base_url']) for t in tiendas.values()}
+        v_sel = {t['codigo']: tk.StringVar(value=t['selector_texto']) for t in tiendas.values()}
+
+        def fila(titulo, var, ancho=60, oculto=False):
+            fr = tk.Frame(cuerpo, bg=SURFACE)
+            fr.pack(fill='x', pady=S(2))
+            label(fr, titulo, 9, 'bold', width=30, anchor='w').pack(side='left')
+            e = entry(fr, var, width=ancho)
+            if oculto:
+                e.config(show='*')
+            e.pack(side='left', ipady=S(3))
+            return fr
+
+        fila('URL de login', v_login)
+        for t in tiendas.values():
+            fr = fila(f'URL base · {t["sucursal"]}', v_base[t['codigo']], 40)
+            label(fr, '  texto de la tarjeta', 8, color=TEXT_MUTED).pack(side='left')
+            entry(fr, v_sel[t['codigo']], width=22).pack(side='left', padx=(S(4), 0), ipady=S(3))
+        fila('Usuario', v_user, 30)
+        fila('Contraseña', v_pass, 30, oculto=True)
+        if plugin.credenciales_en_ambos_lados():
+            label(cuerpo, 'Usando las credenciales guardadas en Configuración (no las del archivo .env).', 8,
+                  color=TEXT_MUTED).pack(anchor='w', pady=(S(2), 0))
+        tk.Checkbutton(cuerpo, text='Actualizar el catálogo de productos en esta descarga', variable=v_cat,
+                       font=f(9), bg=SURFACE, activebackground=SURFACE, anchor='w').pack(anchor='w', pady=(S(6), 0))
+        label(cuerpo, 'Recomendado: el stock actual sale del catálogo. Desmárcalo solo para pruebas: PREVÉ '
+                      'reutilizaría el último catálogo y el stock quedaría con su fecha.', 8, color=TEXT_MUTED,
+              wraplength=S(700), justify='left').pack(anchor='w')
+
+        def guardar_negosy():
+            try:
+                guardar_ajustes(cfg, v_login.get(), v_user.get(), v_pass.get(),
+                                {c: {'base_url': v_base[c].get(), 'selector_texto': v_sel[c].get()} for c in v_base},
+                                v_cat.get())
+            except ConfigError as e:
+                self.app.toast(f'No se guardó: {e}', 'error')
+                return
+            self.app.toast('Ajustes de Negosy guardados', 'ok')
+        Btn(cuerpo, 'Guardar ajustes de Negosy', guardar_negosy, 'secondary', 'sm').pack(anchor='w', pady=(S(10), 0))
 
     def _card_parametros(self):
         import json
