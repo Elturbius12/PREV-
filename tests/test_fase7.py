@@ -122,7 +122,7 @@ def test_pipeline_de_punta_a_punta_con_los_tres_modelos(carpeta_erp, log):
     assert modelos['7750002'] == 'Croston-TSB'
     assert modelos['7750003'] == 'CatBoost'
     assert set(seg['clase_abc']) <= {'A', 'B', 'C'}
-    pron, sin = pp.entrenar_y_pronosticar(panel, seg, dim, fecha_fin, log)
+    pron, sin, _ = pp.entrenar_y_pronosticar(panel, seg, dim, fecha_fin, log)
     assert set(pron['sku']) | set(sin['sku']) == set(dim['sku'])
     assert (pron['demanda_p10_141d'] <= pron['demanda_p50_141d']).all()
     assert (pron['demanda_p50_141d'] <= pron['demanda_p90_141d']).all()

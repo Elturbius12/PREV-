@@ -46,6 +46,13 @@ DEFAULTS = {
                                       'True si el ERP registra cada venta también como "Salida" de almacén.'),
     'compras_son_entradas_de_almacen': (False, 'bool',
                                         'True si el ERP registra cada compra también como "Entrada" de almacén.'),
+    'pedido_atipico_min_unidades': (20, 'int', 'Una línea de venta es un pedido atípico (mayorista) si tiene al menos '
+                                   'estas unidades Y supera pedido_atipico_factor veces la cantidad mediana por '
+                                   'línea de ese producto.'),
+    'pedido_atipico_factor': (10.0, 'float', 'Múltiplo de la cantidad mediana por línea del producto a partir del cual '
+                                             'una línea grande se considera pedido atípico.'),
+    'excluir_atipicos_de_la_demanda': (True, 'bool', 'Los pedidos atípicos siguen restando stock pero no cuentan como '
+                                                     'demanda repetible: no entran al pronóstico ni a su evaluación.'),
     'mapeo_columnas_ventas': ({'fecha': 'FECHA/HORA', 'codigo_barras': 'CÓDIGO DE BARRA', 'producto': 'PRODUCTO',
                                'cantidad': 'CANTIDAD', 'precio': 'PRECIO X UNIDAD', 'sucursal': 'ALMACÉN'}, 'json',
                               'Qué columna del Excel de ventas corresponde a cada campo de PREVÉ.'),
@@ -60,6 +67,20 @@ DEFAULTS = {
     'perfil_importacion': ('', 'string', 'Último perfil de importación manual usado.'),
     'ultima_duracion_s': (None, 'float', 'Duración del último análisis (para estimar el tiempo restante).'),
     'pasos_s': (None, 'json', 'Duración de cada paso del último análisis.'),
+    # ── Cambios experimentales (comparación de modelos / artículo) ──
+    'habilitar_modo_comparacion': (False, 'bool',
+                                   'Habilita el modo "Comparar modelos" en la interfaz de backtesting.'),
+    'modelos_activos': (['GBM', 'GBM_sin_disp', 'CatBoost', 'Croston-TSB',
+                         'Naive', 'SMA', 'SES', 'Holt', 'Croston', 'SBA', 'TSB_NegBin'], 'json',
+                        'Lista de modelos habilitados para la comparación (solo afecta al modo comparación).'),
+    'mostrar_metricas_avanzadas': (False, 'bool',
+                                   'Muestra nombres de modelos y métricas numéricas en la interfaz (modo avanzado).'),
+    'usar_disponibilidad_gbm': (True, 'bool',
+                                 'Incluir features de disponibilidad (stock) en el modelo GBM. '
+                                 'Desactivar para comparar el modelo con y sin corrección por stock-outs.'),
+    'umbral_censura_alerta': (0.4, 'float',
+                               'Fracción de semanas recientes con stock=0 a partir de la cual se marca la '
+                               'recomendación como de menor confianza (0.0–1.0).'),
 }
 
 CICLOS_DEFECTO = [
@@ -124,6 +145,9 @@ class ParametrosModelo:
     almacenes_propios: frozenset = frozenset({'tienda_juliaca', 'almacen_juliaca'})
     ventas_son_salidas_de_almacen: bool = False
     compras_son_entradas_de_almacen: bool = False
+    pedido_atipico_min_unidades: int = 20
+    pedido_atipico_factor: float = 10.0
+    excluir_atipicos_de_la_demanda: bool = True
 
     @property
     def horizonte_semanas(self):
@@ -396,4 +420,7 @@ class Config:
             almacenes_propios=almacenes or ParametrosModelo().almacenes_propios,
             ventas_son_salidas_de_almacen=bool(self.get('ventas_son_salidas_de_almacen')),
             compras_son_entradas_de_almacen=bool(self.get('compras_son_entradas_de_almacen')),
+            pedido_atipico_min_unidades=int(self.get('pedido_atipico_min_unidades')),
+            pedido_atipico_factor=float(self.get('pedido_atipico_factor')),
+            excluir_atipicos_de_la_demanda=bool(self.get('excluir_atipicos_de_la_demanda')),
         )

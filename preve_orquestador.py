@@ -103,7 +103,10 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
         fecha_ancla, progreso,
         ventas_son_salidas_de_almacen=params.ventas_son_salidas_de_almacen,
         compras_son_entradas_de_almacen=params.compras_son_entradas_de_almacen,
-        almacenes_propios=params.almacenes_propios)
+        almacenes_propios=params.almacenes_propios,
+        pedido_atipico_min_unidades=params.pedido_atipico_min_unidades,
+        pedido_atipico_factor=params.pedido_atipico_factor)
+    pedidos_atipicos = ventas_diarias.attrs.pop('pedidos_atipicos', None)
     fecha_datos = stock.index.max()
     # Cada análisis guarda sus resultados en su propia subcarpeta de período dentro de la salida.
     # Lo que no es resultado (órdenes abiertas, estado del ciclo) se queda en la raíz.
@@ -125,9 +128,9 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
         logger.exception('No se pudo generar el Excel de clasificación')
         progreso(f'⚠ No se pudo generar el Excel de clasificación: {e}')
 
-    progreso('Paso 5/7 — Entrenando los 3 modelos de pronóstico (puede tardar unos minutos)...')
-    pronostico, sin_pronostico = entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, progreso,
-                                                        params=params)
+    progreso('Paso 5/7 — Entrenando los modelos de pronóstico (puede tardar unos minutos)...')
+    pronostico, sin_pronostico, extras_modelo = entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin,
+                                                                       progreso, params=params, stock=stock)
 
     # ══════════════════════════════════════════════════════════════════
     # REPORTE DEL CICLO PRINCIPAL (el de mayor horizonte; en Yuju: internacional, 141 días)
@@ -148,6 +151,7 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
                        etiqueta=etiqueta, info_ciclo=info_ciclo, horizonte_semanas=params.horizonte_semanas)
 
     rec_int.to_csv(os.path.join(carpeta_p, NOMBRE_REC_CSV), index=False)
+    _guardar_pedidos_atipicos(pedidos_atipicos, fecha_datos, carpeta_p, progreso)
     sin_pronostico.to_csv(os.path.join(carpeta_p, 'skus_sin_pronostico.csv'), index=False)
 
     # ══════════════════════════════════════════════════════════════════
@@ -223,6 +227,21 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
     return rec_int
 
 
+def _guardar_pedidos_atipicos(registros, fecha_datos, carpeta_periodo, log, dias=90):
+    """pedidos_atipicos.csv: los pedidos atípicos (mayoristas) de los últimos `dias` días: fecha, producto, cliente,
+    unidades. No se pronostican; el informe de compras los lista aparte para comprarlos contra pedido."""
+    if registros is None:
+        return
+    at = pd.DataFrame(registros, columns=['fecha', 'sku', 'producto', 'cliente', 'unidades', 'mediana_linea'])
+    desde = pd.Timestamp(fecha_datos).normalize() - pd.Timedelta(days=dias - 1)
+    rec = at[at['fecha'] >= desde].sort_values('fecha', ascending=False)
+    rec[['fecha', 'sku', 'producto', 'cliente', 'unidades']].to_csv(
+        os.path.join(carpeta_periodo, 'pedidos_atipicos.csv'), index=False)
+    if len(rec):
+        log(f'Pedidos atípicos de los últimos {dias} días: {len(rec):,} pedidos, {rec["unidades"].sum():,.0f} u '
+            f'(no se pronostican; se compran contra pedido). Detalle en pedidos_atipicos.csv')
+
+
 def _guardar_en_base(sucursal, dim, segmentacion, ventas_diarias, stock, rec, fecha_datos, log, horizonte_dias=141):
     """Persiste en preve.db el catálogo, las ventas diarias, el stock actual y el pronóstico de esta corrida."""
     from database import Database
@@ -240,13 +259,13 @@ def _guardar_en_base(sucursal, dim, segmentacion, ventas_diarias, stock, rec, fe
 
 NOMBRE_CLASIFICACION = 'PREVE_Clasificacion_Productos.xlsx'
 GRUPOS_EXPLICACION = [
-    ('Regular / alta rotación', 'LightGBM',
+    ('Regular / alta rotación', 'GBM global (Poisson)',
      'Se vende con frecuencia y de forma estable (ADI ≤ 1.32 y CV² ≤ 0.49). Es el grupo más predecible.'),
-    ('Intermitente', 'Croston-TSB',
+    ('Intermitente', 'GBM global (Poisson)',
      'Se vende de forma esporádica o con cantidades muy variables. El pronóstico es menos preciso.'),
-    ('Lanzamiento nuevo (<13 sem.)', 'CatBoost',
+    ('Lanzamiento nuevo (<13 sem.)', 'GBM global (Poisson)',
      'Producto con menos de 13 semanas de vida: poca historia, se recomienda comprar con cautela.'),
-    ('Sin historia suficiente', 'Croston-TSB',
+    ('Sin historia suficiente', 'GBM global (Poisson)',
      'Menos de 2 semanas con ventas: no hay base para pronosticar; se marca para vigilar.'),
 ]
 
@@ -266,8 +285,15 @@ def _generar_clasificacion(segmentacion, dim, stock, carpeta_salida, log):
     orden_abc = {'A': 0, 'B': 1, 'C': 2}
     seg = seg.assign(_o=seg['clase_abc'].map(orden_abc)).sort_values(['_o', 'margen_total'],
                                                                        ascending=[True, False])
+    from preve_traducciones import traducir_modelo, traducir_segmento
+    from preve_config import Config
+    _avanzado = Config.actual().get('mostrar_metricas_avanzadas')
+    seg['modelo_negocio'] = seg['modelo_asignado'].apply(lambda x: traducir_modelo(x, _avanzado))
+    seg['segmento_negocio'] = seg['segmento'].apply(lambda x: traducir_segmento(x, _avanzado))
     cols = [('sku', 'SKU (código de barra)'), ('nombre', 'Producto'), ('categoria', 'Categoría'),
-            ('segmento', 'Grupo'), ('modelo_asignado', 'Modelo de pronóstico'), ('clase_abc', 'Clase ABC'),
+            ('segmento_negocio' if not _avanzado else 'segmento', 'Grupo'),
+            ('modelo_negocio' if not _avanzado else 'modelo_asignado', 'Modelo de pronóstico'),
+            ('clase_abc', 'Clase ABC'),
             ('adi', 'ADI'), ('cv2', 'CV²'), ('semanas_observables', 'Semanas observadas'),
             ('semanas_con_venta', 'Semanas con venta'), ('stock_actual', 'Stock actual (reconstruido)'),
             ('margen_total', 'Margen acumulado (S/)')]
@@ -597,11 +623,26 @@ def _generar_excel(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_cic
     from openpyxl.worksheet.table import Table, TableStyleInfo
 
     ORANGE = '2D7D5F'   # acento verde salvia; el naranja de Yuju queda solo como banda del header de la app
+    # Traducir términos técnicos a lenguaje de negocio
+    from preve_traducciones import traducir_modelo, traducir_segmento, interpretar_wmape, nota_accion
+    from preve_config import Config
+    modo_avanzado = Config.actual().get('mostrar_metricas_avanzadas')
+    if 'modelo_asignado' in df.columns:
+        df['modelo_negocio'] = df['modelo_asignado'].apply(lambda x: traducir_modelo(x, modo_avanzado))
+    if 'segmento' in df.columns:
+        df['segmento_negocio'] = df['segmento'].apply(lambda x: traducir_segmento(x, modo_avanzado))
+    # Nota explicativa por acción + alerta de censura
+    if 'nota_confianza' not in df.columns:
+        df['nota_confianza'] = ''
+    df['nota_producto'] = df.apply(
+        lambda r: nota_accion(r.get('accion', ''), r.get('motivo_accion', ''), r.get('nota_confianza', '')), axis=1)
     cols = {
         'sku': 'SKU (codigo de barra)', 'nombre': 'Nombre del producto', 'categoria': 'Categoria',
         'proveedor_principal': 'Proveedor principal',
-        'clase_abc': 'Clase ABC (por margen)', 'modelo_asignado': 'Modelo usado',
+        'clase_abc': 'Clase ABC (por margen)',
+        'modelo_negocio' if not modo_avanzado else 'modelo_asignado': 'Modelo usado',
         'accion': 'ACCIÓN', 'motivo_accion': 'Motivo de la acción',
+        'nota_producto': 'Nota explicativa',
         'stock_actual': 'Stock actual (reconstruido)', 'demanda_p50_141d': 'Demanda esperada (horizonte)',
         'demanda_p10_141d': 'Demanda minima esperada (P10)', 'demanda_p90_141d': 'Demanda maxima esperada (P90)',
         'stock_en_transito': 'Stock en tránsito (órdenes abiertas)',
@@ -855,8 +896,17 @@ def _generar_dashboard(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info
 
     df = df.copy()
     df['explicacion'] = df.apply(_explicacion, axis=1)
+    # Agregar alerta de censura a la explicación
+    if 'nota_confianza' in df.columns:
+        mask = df['nota_confianza'].fillna('').str.len() > 0
+        df.loc[mask, 'explicacion'] = df.loc[mask, 'explicacion'] + ' ⚠ ' + df.loc[mask, 'nota_confianza']
+    # Usar nombre traducido del modelo para el usuario
+    if 'modelo_negocio' in df.columns:
+        col_modelo = 'modelo_negocio'
+    else:
+        col_modelo = 'modelo_asignado'
 
-    cols = ['sku', 'nombre', 'categoria', 'proveedor_principal', 'clase_abc', 'modelo_asignado',
+    cols = ['sku', 'nombre', 'categoria', 'proveedor_principal', 'clase_abc', col_modelo,
             'accion', 'motivo_accion', 'stock_actual',
             'demanda_p50_141d', 'rop', 'compra_sugerida_unid', 'decision', 'costo_total_compra_pen',
             'margen_pct', 'tendencia_venta',

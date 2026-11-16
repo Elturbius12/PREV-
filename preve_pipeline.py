@@ -178,9 +178,10 @@ def aplicar_mapeo_ventas(ventas, mapeo, log=log_info):
 def fecha_desde_nombre(path):
     """Fecha de exportación escrita en el nombre del archivo (YYYY-MM-DD o YYYYMMDD), o None."""
     nombre = os.path.basename(str(path))
-    for patron in (r'(20\d{2})-(\d{2})-(\d{2})', r'(20\d{2})(\d{2})(\d{2})'):
-        m = re.search(patron, nombre)
-        if m:
+    # FIX: YYYYMMDD solo con 8 dígitos que no sean parte de un número más largo (el RUC "20603376162" del nombre
+    # del listado se confundía con una fecha) y se prueban TODAS las coincidencias, no solo la primera.
+    for patron in (r'(20\d{2})-(\d{2})-(\d{2})', r'(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)'):
+        for m in re.finditer(patron, nombre):
             try:
                 return pd.Timestamp(int(m.group(1)), int(m.group(2)), int(m.group(3)))
             except ValueError:
@@ -403,10 +404,22 @@ def _mapear_por_nombre(df, col_nombre, mapa_nombre_a_sku, log, nombre_fuente):
 # ---------------------------------------------------------------------------
 # Etapa 3: reconstruir stock diario (ancla = listado más reciente)
 # ---------------------------------------------------------------------------
+def marcar_pedidos_atipicos(skus, cantidades, min_unidades=20, factor=10.0):
+    """(máscara, mediana por SKU): línea atípica = cantidad >= min_unidades y >= factor × mediana de cantidad
+    por línea de ese SKU (mayoristas: reales, restan stock, pero no son demanda repetible)."""
+    idx = skus.index
+    sk = pd.Series(np.asarray(skus), name='sku')
+    q = pd.Series(np.asarray(cantidades, dtype=float))
+    mediana = q.groupby(sk).median()
+    ref = sk.map(mediana).astype(float)
+    mascara = ((q >= min_unidades) & (q >= factor * ref)).to_numpy()
+    return pd.Series(mascara, index=idx), mediana
+
+
 def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_bc_nombre_a_sku,
                       mapa_nombre_a_sku, fecha_ancla, log,
                       ventas_son_salidas_de_almacen=False, compras_son_entradas_de_almacen=False,
-                      almacenes_propios=None):
+                      almacenes_propios=None, pedido_atipico_min_unidades=20, pedido_atipico_factor=10.0):
     """Reconstruye el stock diario hacia atrás desde el stock del listado (fecha_ancla).
 
     ventas_son_salidas_de_almacen: True si el ERP registra cada venta también como "Salida" de almacén.
@@ -415,6 +428,10 @@ def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_bc_
     fecha_ancla: fecha a la que corresponde el stock del listado. None = última transacción registrada.
     almacenes_propios: ubicaciones (tiendas/almacenes) que forman la sucursal; los traslados entre ellas
         se netean a 0. Por defecto, las de San José (Tienda + Almacén Juliaca).
+    pedido_atipico_min_unidades / pedido_atipico_factor: una línea de venta es un pedido atípico (mayorista) si
+        cantidad >= min_unidades y cantidad >= factor × la mediana de cantidad por línea de ese SKU. Siguen
+        restando stock (`mov` es el total) pero se separan en `ventas_diarias['mov_atipico']`; el detalle por línea
+        queda en `ventas_diarias.attrs['pedidos_atipicos']` (lista de registros; sácala con `attrs.pop`).
     """
     # FIX: antes SAN_JOSE_ALMACENES fijo para todas las sucursales; ahora viene de la configuración
     propios = frozenset(normalizar_ubicacion(a) for a in (almacenes_propios or SAN_JOSE_ALMACENES))
@@ -426,10 +443,29 @@ def reconstruir_stock(ventas, compras, movimientos, dim, mapa_bc_a_sku, mapa_bc_
     ventas['fecha'] = _parse_fechas(ventas['FECHA/HORA'], ['%d-%m-%Y %H:%M', '%d-%m-%Y %H:%M:%S'], log, 'Ventas')
     ventas['cantidad'] = pd.to_numeric(ventas['CANTIDAD'], errors='coerce').fillna(0)
     ventas['fecha'] = ventas['fecha'].dt.normalize()
-    ventas_diarias = ventas.dropna(subset=['sku', 'fecha']).groupby(
-        ['sku', 'fecha'])['cantidad'].sum().reset_index()
+    ventas = ventas.dropna(subset=['sku', 'fecha'])
+    atipico, mediana = marcar_pedidos_atipicos(ventas['sku'], ventas['cantidad'], pedido_atipico_min_unidades,
+                                               pedido_atipico_factor)
+    ventas_diarias = ventas.groupby(['sku', 'fecha'])['cantidad'].sum().reset_index()
     ventas_diarias.columns = ['sku', 'fecha', 'mov']
     ventas_diarias['mov'] = -ventas_diarias['mov']
+    at = ventas[atipico.to_numpy()]
+    mov_at = -at.groupby(['sku', 'fecha'])['cantidad'].sum().rename('mov_atipico')
+    ventas_diarias = ventas_diarias.merge(mov_at.reset_index(), on=['sku', 'fecha'], how='left')
+    ventas_diarias['mov_atipico'] = ventas_diarias['mov_atipico'].fillna(0.0)
+    col_cli = next((c for c in ('CLIENTE', 'Cliente') if c in ventas.columns), None)
+    ventas_diarias.attrs['pedidos_atipicos'] = pd.DataFrame({
+        'fecha': at['fecha'], 'sku': at['sku'],
+        'producto': at['PRODUCTO'] if 'PRODUCTO' in at.columns else at['sku'],
+        'cliente': at[col_cli] if col_cli else '', 'unidades': at['cantidad'],
+        'mediana_linea': at['sku'].map(mediana)}).sort_values('fecha').reset_index(drop=True).to_dict('records')
+    # Lista de registros (un DataFrame en attrs rompe pd.concat). Quien la use debe sacarla con attrs.pop(...)
+    # enseguida: pandas copia en profundidad los attrs en cada operación y eso vuelve lento todo el pipeline.
+    if atipico.any():
+        log(f'Pedidos atípicos (≥ {pedido_atipico_min_unidades} u y ≥ {pedido_atipico_factor:g}× la mediana por '
+            f'línea del producto): {int(atipico.sum()):,} líneas, {at["cantidad"].sum():,.0f} u de '
+            f'{ventas["cantidad"].sum():,.0f} u vendidas ({at["cantidad"].sum() / ventas["cantidad"].sum():.1%}). '
+            f'Siguen restando stock.')
 
     # ---- compras: suma stock ----
     compras = _mapear_por_codigo_barra(compras, 'COD. BARRA', mapa_bc_a_sku, log, 'Compras',
@@ -552,7 +588,12 @@ def construir_panel_y_segmentacion(stock, ventas_diarias, dim, log, params=None)
     p = params or ParametrosModelo()
     ventas_diarias = ventas_diarias.copy()
     ventas_diarias['fecha'] = pd.to_datetime(ventas_diarias['fecha'])
-    ventas_diarias['unidades'] = -ventas_diarias['mov']
+    # Pedidos atípicos (mayoristas): restan stock pero no son demanda repetible -> se excluyen de la demanda.
+    # Si la columna no existe (datos antiguos o tests) la demanda es el total, como siempre.
+    if p.excluir_atipicos_de_la_demanda and 'mov_atipico' in ventas_diarias.columns:
+        ventas_diarias['unidades'] = -(ventas_diarias['mov'] - ventas_diarias['mov_atipico'].fillna(0.0))
+    else:
+        ventas_diarias['unidades'] = -ventas_diarias['mov']
     ventas_diarias = ventas_diarias[ventas_diarias['unidades'] >= 0]
 
     fecha_fin = ventas_diarias['fecha'].max()
@@ -661,21 +702,40 @@ def construir_features_lgb(sub):
     return sub, [f'ventas_{w}s' for w in VENTANAS_LGB]
 
 
-def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log, params=None):
-    """Entrena Croston-TSB, LightGBM y CatBoost y pronostica el horizonte (p10/p50/p90)."""
-    import lightgbm as lgb
+MODELO_GBM = 'GBM global (Poisson)'
+
+
+def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log, params=None, stock=None):
+    """Pronostica el horizonte (p10/p50/p90) de cada SKU.
+
+    Modelo principal: GBM global con pérdida de Poisson (preve_modelo_gbm), que aprende de todos los SKU con
+    historia de ventas y usa la disponibilidad (stock) como señal. Si no hay historia suficiente para entrenarlo
+    (menos de ~13 semanas), todo queda como antes: Croston-TSB para los intermitentes, CatBoost (por categoría y
+    precio) para los productos nuevos o sin ninguna venta, y los 'regulares' quedan sin pronóstico (no se inventa).
+    `stock`: DataFrame fecha × sku (stock al cierre del día), el mismo que recibe construir_panel_y_segmentacion.
+    Actualiza `segmentacion['modelo_asignado']` con el modelo realmente usado.
+    """
     from catboost import CatBoostRegressor
     from statsforecast.models import TSB
+    from preve_modelo_gbm import pronosticar_gbm
 
     # FIX: horizonte e hiperparámetros desde la configuración (antes fijos en el código)
     p = params or ParametrosModelo()
     hs = p.horizonte_semanas                 # horizonte real en semanas (141 d → 20.14)
-    ht = max(1, int(round(hs)))              # horizonte entero para el target de LightGBM
+    ht = max(1, int(round(hs)))              # horizonte entero para el target de los modelos
 
-    panel_full = panel_full.merge(segmentacion[['sku', 'modelo_asignado']], on='sku', how='left')
     resultados = []
 
-    # ---------- Croston-TSB (demanda intermitente) ----------
+    # ---------- Modelo global GBM (Poisson): todos los SKU con historia de ventas ----------
+    log('Entrenando el modelo global de demanda (GBM Poisson)...')
+    gbm, gbm_importances = pronosticar_gbm(panel_full, stock, fecha_fin, hs, log)
+    if gbm is not None:
+        resultados.extend(gbm.to_dict('records'))
+        segmentacion.loc[segmentacion.sku.isin(set(gbm.sku)), 'modelo_asignado'] = MODELO_GBM
+
+    panel_full = panel_full.merge(segmentacion[['sku', 'modelo_asignado']], on='sku', how='left')
+
+    # ---------- Croston-TSB (solo cuando no hay GBM) ----------
     skus_croston = segmentacion[segmentacion.modelo_asignado == 'Croston-TSB']['sku'].tolist()
     log(f'Entrenando Croston-TSB para {len(skus_croston)} SKU...')
     for sku in skus_croston:
@@ -698,33 +758,7 @@ def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log, params
         p90 = (pred + 1.2816 * std) * hs
         resultados.append({'sku': sku, 'demanda_p10_141d': p10, 'demanda_p50_141d': p50, 'demanda_p90_141d': p90})
 
-    # ---------- LightGBM (regular / alta rotación) ----------
-    skus_lgb = segmentacion[segmentacion.modelo_asignado == 'LightGBM']['sku'].tolist()
-    log(f'Entrenando LightGBM para {len(skus_lgb)} SKU...')
-    if skus_lgb:
-        sub, feat_cols = construir_features_lgb(panel_full[panel_full.sku.isin(skus_lgb)])
-        h = ht
-        sub['y_20s'] = sub.groupby('sku')['unidades_venta_neta'].transform(
-            lambda x: construir_target_horizonte(x, h))
-        train = sub.dropna(subset=feat_cols + ['y_20s'])
-        if len(train) > 50:
-            model = lgb.LGBMRegressor(**{'verbosity': -1, **p.lgbm_params})
-            model.fit(train[feat_cols], train['y_20s'])
-            resid_std = float(np.std(model.predict(train[feat_cols]) - train['y_20s']))
-            latest = sub.sort_values('semana_inicio').groupby('sku').tail(1)
-            latest = latest.dropna(subset=feat_cols)
-            # FIX: el target cubre h semanas enteras; se reescala al horizonte real (20.14 sem)
-            # para que LightGBM, Croston y CatBoost expresen la demanda en el mismo horizonte
-            escala = hs / h
-            resid_std *= escala
-            preds = np.clip(model.predict(latest[feat_cols]), 0, None) * escala
-            for sku, p50 in zip(latest['sku'], preds):
-                resultados.append({'sku': sku, 'demanda_p10_141d': max(0, p50 - 1.2816 * resid_std),
-                                    'demanda_p50_141d': p50, 'demanda_p90_141d': p50 + 1.2816 * resid_std})
-        else:
-            log('  LightGBM: datos insuficientes para entrenar, se omite (no se inventa pronóstico).')
-
-    # ---------- CatBoost (lanzamientos nuevos) ----------
+    # ---------- CatBoost (productos sin ninguna venta: se estima por categoría y precio) ----------
     skus_cb = segmentacion[segmentacion.modelo_asignado == 'CatBoost']['sku'].tolist()
     log(f'Entrenando CatBoost para {len(skus_cb)} SKU...')
     if skus_cb:
@@ -753,7 +787,8 @@ def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log, params
         feat_cols = cat_cols + num_cols
         train = base.dropna(subset=num_cols + ['y'])
         train = train[train['n_semanas'].fillna(0) >= 4]
-        if len(train) > 30:
+        # CatBoost no entrena si todos los objetivos son iguales (p. ej. todos los SKU sin ventas): no hay señal
+        if len(train) > 30 and train['y'].nunique() > 1:
             model = CatBoostRegressor(**{'verbose': False, **p.catboost_params, 'cat_features': cat_cols})
             model.fit(train[feat_cols], train['y'])
             resid_std = float(np.std(model.predict(train[feat_cols]) - train['y']))
@@ -769,10 +804,16 @@ def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log, params
         else:
             log('  CatBoost: datos insuficientes para entrenar, se omite (no se inventa pronóstico).')
 
-    pronostico = pd.DataFrame(resultados).drop_duplicates(subset='sku')
+    _PRON_COLS = ['sku', 'demanda_p10_141d', 'demanda_p50_141d', 'demanda_p90_141d']
+    pronostico = pd.DataFrame(resultados or [], columns=_PRON_COLS).drop_duplicates(subset='sku')
+    # una lista vacía o mezclada deja las columnas en object y calcular_recomendacion falla en .round()
+    pronostico[_PRON_COLS[1:]] = pronostico[_PRON_COLS[1:]].astype(float)
     sin_pronostico = segmentacion[~segmentacion.sku.isin(pronostico.sku)]
     log(f'Pronóstico generado para {len(pronostico)} SKU. Sin pronóstico posible: {len(sin_pronostico)}')
-    return pronostico, sin_pronostico
+    extras = {}
+    if gbm_importances:
+        extras['feature_importances'] = gbm_importances
+    return pronostico, sin_pronostico, extras
 
 
 # ---------------------------------------------------------------------------
@@ -996,6 +1037,37 @@ def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fec
     ultima = con_venta.groupby('sku')['semana_inicio'].max()
     # días desde la última semana con venta; NaN si nunca vendió (sin evidencia, no se descontinúa)
     df['dias_sin_venta'] = df['sku'].map((pd.Timestamp(fecha_fin) - ultima).dt.days.clip(lower=0))
+
+    # --- Indicador de confianza por censura (stock-outs recientes) ---
+    # Semanas recientes (últimas 13) con stock=0 indican demanda posiblemente censurada
+    try:
+        from preve_config import Config
+        umbral_censura = Config.actual().get('umbral_censura_alerta')
+    except Exception:
+        umbral_censura = 0.4
+    sem_recientes_13 = panel_full[panel_full['semana_inicio'] > (fecha_fin - pd.Timedelta(weeks=13))]
+    if stock is not None and len(stock):
+        stock_sem = {}
+        for sem in sem_recientes_13['semana_inicio'].unique():
+            sem_ts = pd.Timestamp(sem)
+            dia_inicio = sem_ts - pd.Timedelta(days=1)
+            cercano = stock.index[stock.index <= dia_inicio]
+            if len(cercano):
+                stock_sem[sem] = (stock.loc[cercano[-1]] > 0).astype(int)
+        if stock_sem:
+            stock_13 = pd.DataFrame(stock_sem).T
+            frac_sin_stock = 1.0 - stock_13.mean()
+            df['frac_sin_stock_13sem'] = df['sku'].map(frac_sin_stock).fillna(0.0)
+        else:
+            df['frac_sin_stock_13sem'] = 0.0
+    else:
+        df['frac_sin_stock_13sem'] = 0.0
+    df['alerta_censura'] = df['frac_sin_stock_13sem'] >= umbral_censura
+    df['nota_confianza'] = np.where(
+        df['alerta_censura'],
+        'Esta recomendación tiene menor confianza porque el producto estuvo frecuentemente agotado; '
+        'el sistema corrigió la demanda estimada, pero verifica manualmente si es posible.',
+        '')
 
     # --- Clasificar acción ---
     if plantilla is not None:

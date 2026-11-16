@@ -13,6 +13,8 @@ from preve_ui import S, Btn, Card, ProgressBar, ScrollFrame, label, entry
 from preve_utils import get_logger
 from preve_vistas import Vista, fmt_mmss
 
+from preve_backtesting import ETIQ_WMAPE, ETIQ_WMAPE_STOCK, ETIQ_WMAPE_TOTAL, NOTA_MAPE, _pc  # noqa: E402
+
 logger = get_logger('vista_backtesting')
 NARANJA = ui.BRAND_ORANGE
 
@@ -57,6 +59,23 @@ class VistaBacktesting(Vista):
         tk.Checkbutton(card.body, text='Simular también la compra de cada día de reporte final del ciclo',
                        variable=self.var_compras, font=ui.f(9), bg=ui.SURFACE, activebackground=ui.SURFACE
                        ).pack(anchor='w', pady=(S(8), 0))
+
+        # Modo comparación (Cambio 7)
+        from preve_config import Config
+        modo_comp_habilitado = Config.actual().get('habilitar_modo_comparacion')
+        self.var_comparar = tk.BooleanVar(value=False)
+        if modo_comp_habilitado:
+            sep = tk.Frame(card.body, bg=ui.BORDER, height=1)
+            sep.pack(fill='x', pady=S(8))
+            label(card.body, 'MODO COMPARACIÓN', 8, 'bold', NARANJA).pack(anchor='w')
+            tk.Checkbutton(card.body, text='Comparar todos los modelos disponibles y encontrar cuál funciona '
+                                          'mejor para cada producto',
+                           variable=self.var_comparar, font=ui.f(9), bg=ui.SURFACE, activebackground=ui.SURFACE
+                           ).pack(anchor='w', pady=(S(4), 0))
+            label(card.body, 'Evalúa cada producto con más de 10 métodos distintos. Tarda significativamente '
+                             'más que el backtesting normal.', 9,
+                  color=ui.TEXT_DIM, wraplength=S(720), justify='left').pack(anchor='w')
+
         label(card.body, 'Usa los reportes de la carpeta de entrada de la sucursal. Cada ventana entrena los 3 modelos '
                          '(≈1 minuto por ventana): 6 meses con ventanas de 14 días tardan unos 15–20 minutos.', 9,
               color=ui.TEXT_DIM, wraplength=S(720), justify='left').pack(anchor='w', pady=(S(6), 0))
@@ -106,11 +125,12 @@ class VistaBacktesting(Vista):
         self.limpiar(self.resumen)
         self.t0 = datetime.datetime.now()
         sucursal, compras = self.app.sucursal, self.var_compras.get()
-        threading.Thread(target=self._trabajo, args=(carpeta, sucursal, ini, fin, ventana, compras),
+        comparar = self.var_comparar.get()
+        threading.Thread(target=self._trabajo, args=(carpeta, sucursal, ini, fin, ventana, compras, comparar),
                          daemon=True).start()
         self._poll()
 
-    def _trabajo(self, carpeta, sucursal, ini, fin, ventana, compras):
+    def _trabajo(self, carpeta, sucursal, ini, fin, ventana, compras, comparar=False):
         import preve_backtesting as bt
         from preve_config import Config
         from preve_reglas import cargar_plantilla
@@ -119,11 +139,27 @@ class VistaBacktesting(Vista):
             conf = Config.actual()
             put(('estado', (0.0, 'Leyendo los reportes y reconstruyendo el stock…')))
             datos = bt.DatosBacktest.desde_carpeta(carpeta, sucursal, log=lambda m: None)
-            b = bt.Backtester(datos, conf.parametros_modelo(sucursal), cargar_plantilla(conf.get('plantilla_categorias')),
-                              ventana_dias=ventana, sucursal=sucursal,
-                              log=lambda m: put(('log', m)), progreso=lambda f, t: put(('estado', (f, t))),
-                              cancelar=self._cancelar.is_set)
-            put(('fin', b.run(ini, fin, simular_compras=compras)))
+
+            if comparar:
+                put(('estado', (0.05, 'Modo comparación: evaluando todos los modelos…')))
+                modelos_activos = conf.get('modelos_activos')
+                resultado = bt.comparar_modelos(
+                    datos, ini, fin,
+                    params=conf.parametros_modelo(sucursal),
+                    modelos=modelos_activos if modelos_activos else None,
+                    plantilla=cargar_plantilla(conf.get('plantilla_categorias')),
+                    ventana_dias=ventana, sucursal=sucursal,
+                    log=lambda m: put(('log', m)),
+                    progreso=lambda f, t: put(('estado', (f, t))),
+                    cancelar=self._cancelar.is_set)
+                put(('fin_comparacion', resultado))
+            else:
+                b = bt.Backtester(datos, conf.parametros_modelo(sucursal),
+                                  cargar_plantilla(conf.get('plantilla_categorias')),
+                                  ventana_dias=ventana, sucursal=sucursal,
+                                  log=lambda m: put(('log', m)), progreso=lambda f, t: put(('estado', (f, t))),
+                                  cancelar=self._cancelar.is_set)
+                put(('fin', b.run(ini, fin, simular_compras=compras)))
         except bt.BacktestCancelado:
             put(('cancelado', None))
         except Exception as e:  # noqa: BLE001 — se muestra en pantalla con el detalle completo
@@ -164,12 +200,21 @@ class VistaBacktesting(Vista):
             self.log.insert('end', '\nERROR:\n' + dato)
             self.log.see('end')
             return
+        if tipo == 'fin_comparacion':
+            r = dato
+            self.barra.set(1.0, ui.OK)
+            self.lbl_estado.config(text='Comparación de modelos terminada.', fg=ui.TEXT)
+            self._mostrar_resumen_comparacion(r)
+            self.app.toast('Comparación de modelos terminada', 'ok',
+                           accion=('Abrir Excel', lambda: self.app.abrir_archivo(r['ruta_excel'])))
+            return
         r = dato
         self.barra.set(1.0, ui.OK)
         self.lbl_estado.config(text=f'Listo en {fmt_mmss(r["duracion_s"])}.', fg=ui.TEXT)
         self._mostrar_resumen(r)
+        g = r['global']
         self.app.toast(f'Backtesting listo: {r["total_productos"]:,} productos, {r["total_periodos"]} períodos, '
-                       f'MAPE {r["mape_promedio"]:.1f}%', 'ok', accion=('Abrir Excel',
+                       f'{ETIQ_WMAPE} {_pc(g["wmape"])}', 'ok', accion=('Abrir Excel',
                                                                       lambda: self.app.abrir_archivo(r['ruta_excel'])))
 
     def _mostrar_resumen(self, r):
@@ -177,21 +222,75 @@ class VistaBacktesting(Vista):
         self.limpiar(self.resumen)
         g = r['global']
         fila_cards(self.resumen, [
-            lambda p: stat_card(p, 'Productos', f'{r["total_productos"]:,}', 'evaluados'),
-            lambda p: stat_card(p, 'Períodos', f'{r["total_periodos"]}',
-                                f'{len(r["omitidas"])} omitidos por datos insuficientes'),
-            lambda p: stat_card(p, 'MAPE', f'{g["mape"]:.1f}%', 'sMAPE cuando la venta real es 0', NARANJA),
-            lambda p: stat_card(p, 'WMAPE', f'{g["wmape"]:.1f}%' if g['wmape'] == g['wmape'] else '—',
-                                'error ponderado por volumen'),
+            lambda p: stat_card(p, ETIQ_WMAPE, _pc(g['wmape']), 'indicador principal · ponderado por volumen',
+                                NARANJA),
+            lambda p: stat_card(p, ETIQ_WMAPE_TOTAL, _pc(g['wmape_total']), 'contra todo lo vendido, con atípicos'),
+            lambda p: stat_card(p, ETIQ_WMAPE_STOCK, _pc(g['wmape_con_stock']), 'stock > 0 al inicio de la ventana'),
+            lambda p: stat_card(p, 'Productos', f'{r["total_productos"]:,}',
+                                f'evaluados · {r["total_periodos"]} períodos ({len(r["omitidas"])} omitidos)'),
         ], padx=0)
         caja = Card(self.resumen, padx=18, pady=14)
         caja.pack(fill='x', pady=(0, S(10)))
         label(caja.body, 'POR MODELO', 8, 'bold', ui.TEXT_MUTED).pack(anchor='w')
         for m in r['por_modelo'].to_dict('records'):
-            label(caja.body, f'{m["modelo"]:<12}  {m["productos"]:>5} productos   MAPE {m["mape"]:6.1f}%   '
-                             f'MAE {m["mae"]:7.2f}   Bias {m["bias"]:+7.2f}', 9, mono=True).pack(anchor='w')
+            label(caja.body, f'{m["modelo"]:<12}  {m["productos"]:>5} productos   WMAPE {_pc(m["wmape"]):>7}   '
+                             f'MAE {m["mae"]:7.2f}   Bias {m["bias"]:+7.2f}   MAPE {_pc(m["mape"]):>7}',
+                  9, mono=True).pack(anchor='w')
+        label(caja.body, f'MAPE: {NOTA_MAPE}.', 8, color=ui.TEXT_MUTED).pack(anchor='w', pady=(S(4), 0))
         Btn(self.resumen, 'Abrir el Excel del backtesting', lambda: self.app.abrir_archivo(r['ruta_excel']),
             'primary', 'md').pack(anchor='w')
+
+    def _mostrar_resumen_comparacion(self, r):
+        """Muestra los resultados del modo comparación con lenguaje simple."""
+        from preve_vistas import fila_cards, stat_card
+        from preve_traducciones import traducir_modelo, interpretar_wmape
+        self.limpiar(self.resumen)
+
+        mejor = r['mejor_por_sku']
+        n_modelos = len(r['resultados_por_modelo'])
+
+        # Cards de resumen
+        conteo = mejor['mejor_modelo'].value_counts()
+        mejor_global = conteo.index[0] if len(conteo) else '—'
+        wmape_mejor_global = None
+        if mejor_global in r['resultados_por_modelo']:
+            wmape_mejor_global = r['resultados_por_modelo'][mejor_global]['global'].get('wmape')
+
+        etiq, color_sem, _ = interpretar_wmape(wmape_mejor_global)
+        color_map = {'verde': ui.OK, 'amarillo': ui.WARN, 'rojo': ui.DANGER, 'gris': ui.TEXT_MUTED}
+
+        fila_cards(self.resumen, [
+            lambda p: stat_card(p, 'Mejor modelo global', traducir_modelo(mejor_global),
+                                f'{_pc(wmape_mejor_global)} de margen de error',
+                                color_map.get(color_sem, ui.TEXT)),
+            lambda p: stat_card(p, 'Modelos evaluados', str(n_modelos), f'{len(mejor)} productos analizados'),
+            lambda p: stat_card(p, 'Confianza alta', f'{(mejor["confianza"] == "Alta").sum()}',
+                                f'de {len(mejor)} productos'),
+        ], padx=0)
+
+        # Tabla: modelo → SKU donde es el mejor
+        caja = Card(self.resumen, padx=18, pady=14)
+        caja.pack(fill='x', pady=(0, S(10)))
+        label(caja.body, '¿QUÉ MODELO FUNCIONA MEJOR?', 8, 'bold', ui.TEXT_MUTED).pack(anchor='w')
+        label(caja.body, 'Cada producto se evaluó con todos los métodos; se muestra cuál acertó más.',
+              9, color=ui.TEXT_DIM, wraplength=S(700)).pack(anchor='w', pady=(S(2), S(6)))
+        for nombre, res in sorted(r['resultados_por_modelo'].items(),
+                                   key=lambda x: x[1]['global'].get('wmape', 999)):
+            g = res['global']
+            n_mejor = int((mejor['mejor_modelo'] == nombre).sum())
+            etiq_m, color_m, _ = interpretar_wmape(g.get('wmape'))
+            linea = (f'{traducir_modelo(nombre):<30} {etiq_m:<22} '
+                     f'Mejor para {n_mejor:>4} productos')
+            label(caja.body, linea, 9, mono=True,
+                  color=color_map.get(color_m, ui.TEXT)).pack(anchor='w')
+
+        # Botones de exportación
+        botones_exp = tk.Frame(self.resumen, bg=ui.BG)
+        botones_exp.pack(anchor='w', pady=(S(8), 0))
+        Btn(botones_exp, 'Exportar para reporte de gestión',
+            lambda: self.app.abrir_archivo(r['ruta_excel']), 'primary', 'md').pack(side='left', padx=(0, S(8)))
+        Btn(botones_exp, 'Exportar datos técnicos',
+            lambda: self.app.abrir_archivo(r['ruta_excel']), 'ghost', 'md').pack(side='left')
 
     def _anteriores(self):
         from database import Database
@@ -205,7 +304,8 @@ class VistaBacktesting(Vista):
             fila = tk.Frame(caja.body, bg=ui.SURFACE)
             fila.pack(fill='x', pady=S(1))
             label(fila, f'{e["fecha_inicio"]} – {e["fecha_fin"]} · {e["total_productos"] or 0:,} productos · '
-                        f'{e["total_periodos"] or 0} períodos · MAPE {e["mape_promedio"] or 0:.1f}%', 9, mono=True
+                        f'{e["total_periodos"] or 0} períodos · MAPE {e["mape_promedio"] or 0:.1f}% (poco confiable)', 9,
+                  mono=True
                   ).pack(side='left')
             if e.get('ruta_excel'):
                 Btn(fila, 'Abrir', lambda p=e['ruta_excel']: self.app.abrir_archivo(p), 'ghost', 'sm').pack(side='right')
