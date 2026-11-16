@@ -152,6 +152,6 @@ def test_pronostico_siempre_numerico(log):
     seg = pd.DataFrame({'sku': ['A'], 'modelo_asignado': ['Croston-TSB'], 'segmento': ['Sin historia suficiente']})
     dim = pd.DataFrame({'sku': ['A'], 'nombre': ['A'], 'categoria': 'X', 'subcategoria': None,
                         'costo_puesto_almacen_pen': 5.0, 'precio_regular_pen': 10.0})
-    pron, _, _ = pp.entrenar_y_pronosticar(panel, seg, dim, pd.Timestamp('2025-01-12'), log,
-                                          params=pp.ParametrosModelo(horizonte_dias=14.0))
+    pron, _ = pp.entrenar_y_pronosticar(panel, seg, dim, pd.Timestamp('2025-01-12'), log,
+                                       params=pp.ParametrosModelo(horizonte_dias=14.0))
     assert all(str(pron[c].dtype) == 'float64' for c in pron.columns if c != 'sku')

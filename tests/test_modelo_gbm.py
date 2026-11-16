@@ -22,10 +22,9 @@ def _panel_y_stock(n_sku=40, semanas=60, seed=0):
 
 def test_pronostico_valido():
     panel, stock, _, fin = _panel_y_stock()
-    out, importances = G.pronosticar_gbm(panel, stock, fin, 2.0, log=lambda m: None)
+    out = G.pronosticar_gbm(panel, stock, fin, 2.0, log=lambda m: None)
     cols = ['demanda_p10_141d', 'demanda_p50_141d', 'demanda_p90_141d']
     assert list(out.columns) == ['sku'] + cols
-    assert isinstance(importances, dict) and len(importances) > 0
     assert out['sku'].is_unique and set(out['sku']) <= set(panel['sku'])
     assert not out[cols].isna().any().any() and (out[cols] >= 0).all().all()
     assert (out.demanda_p10_141d <= out.demanda_p50_141d + 1e-9).all()
@@ -34,8 +33,7 @@ def test_pronostico_valido():
 
 def test_el_pronostico_sigue_a_la_demanda_real():
     panel, stock, tasas, fin = _panel_y_stock(n_sku=60, semanas=70, seed=1)
-    out, _ = G.pronosticar_gbm(panel, stock, fin, 2.0, log=lambda m: None)
-    out = out.set_index('sku')
+    out = G.pronosticar_gbm(panel, stock, fin, 2.0, log=lambda m: None).set_index('sku')
     real = pd.Series(tasas * 2.0, index=[f'S{i:03d}' for i in range(60)])
     assert out['demanda_p50_141d'].corr(real.reindex(out.index)) > 0.6
     assert abs(out['demanda_p50_141d'].sum() / real.sum() - 1) < 0.3      # sin sesgo grande
@@ -43,8 +41,7 @@ def test_el_pronostico_sigue_a_la_demanda_real():
 
 def test_historia_corta_no_entrena():
     panel, stock, _, fin = _panel_y_stock(semanas=10)
-    out, imp = G.pronosticar_gbm(panel, stock, fin, 2.0, log=lambda m: None)
-    assert out is None and imp is None
+    assert G.pronosticar_gbm(panel, stock, fin, 2.0, log=lambda m: None) is None
 
 
 def test_descarta_la_semana_incompleta():
@@ -59,14 +56,14 @@ def test_descarta_la_semana_incompleta():
 
 def test_sin_stock_igual_funciona():
     panel, _, _, fin = _panel_y_stock()
-    out, _ = G.pronosticar_gbm(panel, None, fin, 2.0, log=lambda m: None)
+    out = G.pronosticar_gbm(panel, None, fin, 2.0, log=lambda m: None)
     assert out is not None and len(out) > 0
 
 
 def test_la_disponibilidad_importa():
     """Un SKU sin stock no vende; el modelo no debe confundirlo con 'sin demanda' cuando se repone."""
     panel, stock, _, fin = _panel_y_stock(n_sku=40, semanas=60, seed=2)
-    out, _ = G.pronosticar_gbm(panel, stock, fin, 2.0, log=lambda m: None)
+    out = G.pronosticar_gbm(panel, stock, fin, 2.0, log=lambda m: None)
     assert out['demanda_p50_141d'].sum() > 0
 
 
@@ -78,9 +75,8 @@ def test_entrenar_y_pronosticar_etiqueta_el_modelo_usado(log):
     seg['segmento'] = 'Regular / alta rotación'
     dim = pd.DataFrame({'sku': seg['sku'], 'nombre': seg['sku'], 'categoria': 'X',
                         'subcategoria': None, 'costo_puesto_almacen_pen': 5.0, 'precio_regular_pen': 10.0})
-    pron, sin, extras = pp.entrenar_y_pronosticar(panel, seg, dim, fin, log,
-                                                   params=pp.ParametrosModelo(horizonte_dias=14.0), stock=stock)
-    assert 'feature_importances' in extras
+    pron, sin = pp.entrenar_y_pronosticar(panel, seg, dim, fin, log,
+                                          params=pp.ParametrosModelo(horizonte_dias=14.0), stock=stock)
     con_ventas = set(panel.loc[panel['unidades_venta_neta'] > 0, 'sku'])
     assert set(pron['sku']) == con_ventas                      # sin ninguna venta no se inventa pronóstico
     assert set(sin['sku']) == set(seg['sku']) - con_ventas

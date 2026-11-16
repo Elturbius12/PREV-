@@ -116,15 +116,39 @@ class _Features:
 
 
 def pronosticar_gbm(panel_full, stock, fecha_fin, hs, log=print, inflacion_sigma=None,
-                    usar_disponibilidad=True):
+                    usar_disponibilidad=True, calcular_importancias=False, devolver_extras=False):
     """Pronostica la demanda de los próximos `hs` semanas para cada SKU con historia de ventas.
 
-    Devuelve (DataFrame [sku, demanda_p10/p50/p90_141d], dict feature_importances {nombre: valor})
-    o (None, None) si no hay historia suficiente para entrenar.
-    Si usar_disponibilidad=False, excluye av4/av13/av26/stock de las features.
+    Devuelve DataFrame [sku, demanda_p10_141d, demanda_p50_141d, demanda_p90_141d], o None si no hay historia
+    suficiente para entrenar (comportamiento original).
+
+    Opcionales (todos apagados por defecto, no cambian el pronóstico):
+      usar_disponibilidad=False  excluye av4/av13/av26/stock de las features (experimento "sin corrección").
+      calcular_importancias=True estima la importancia de cada variable (permutation importance; es lento).
+      devolver_extras=True       devuelve (DataFrame o None, extras) con extras = {'features': [...],
+                                 'importancias': DataFrame [variable, importancia] o None}.
     """
+    out, extras = _pronosticar_gbm(panel_full, stock, fecha_fin, hs, log, inflacion_sigma, usar_disponibilidad,
+                                   calcular_importancias)
+    return (out, extras) if devolver_extras else out
+
+
+def importancia_permutacion(modelo, X, y, n_muestra=2000, n_repeticiones=5, semilla=42):
+    """DataFrame [variable, importancia] (aumento del error absoluto medio al barajar cada variable)."""
+    from sklearn.inspection import permutation_importance
+    n = min(n_muestra, len(X))
+    idx = np.random.default_rng(semilla).choice(len(X), n, replace=False)
+    pi = permutation_importance(modelo, X.iloc[idx], np.asarray(y)[idx], n_repeats=n_repeticiones,
+                                random_state=semilla, scoring='neg_mean_absolute_error')
+    return (pd.DataFrame({'variable': list(X.columns), 'importancia': pi.importances_mean})
+            .sort_values('importancia', ascending=False).reset_index(drop=True))
+
+
+def _pronosticar_gbm(panel_full, stock, fecha_fin, hs, log, inflacion_sigma, usar_disponibilidad,
+                     calcular_importancias):
     from sklearn.ensemble import HistGradientBoostingRegressor
     infl = INFLACION_SIGMA if inflacion_sigma is None else inflacion_sigma
+    extras = {'features': [], 'importancias': None}
     skus, semanas, V, A, S = _matrices(panel_full, stock, fecha_fin)
     n, K = V.shape
     ht = max(1, int(round(hs)))
@@ -132,13 +156,14 @@ def pronosticar_gbm(panel_full, stock, fecha_fin, hs, log=print, inflacion_sigma
     if len(cortes) < MIN_CORTES:
         log(f'  Modelo GBM: solo {K} semanas de historia (hacen falta ≥ {CORTE_MIN + MIN_CORTES + ht - 1}); '
             f'no se usa el modelo global.')
-        return None, None
+        return None, extras
     F = _Features(V, A, S)
     sin_stock = stock is None or not len(stock)
     if sin_stock or not usar_disponibilidad:
         cols = [c for c in FEATURES if c not in COLS_DISPONIBILIDAD]
     else:
-        cols = FEATURES
+        cols = list(FEATURES)
+    extras['features'] = cols
     cs = F.cs
     Xs, ys = [], []
     for kk in cortes:
@@ -149,20 +174,15 @@ def pronosticar_gbm(panel_full, stock, fecha_fin, hs, log=print, inflacion_sigma
         ys.append((cs[:, kk + ht] - cs[:, kk])[m])
     if not Xs or sum(len(x) for x in Xs) < MIN_FILAS:
         log('  Modelo GBM: muy pocas observaciones para entrenar; no se usa el modelo global.')
-        return None, None
+        return None, extras
     X = pd.concat(Xs, ignore_index=True)
     y = np.concatenate(ys)
     modelo = HistGradientBoostingRegressor(**PARAMS_GBM)
     modelo.fit(X, y)
-
-    # HistGradientBoostingRegressor no expone feature_importances_;
-    # se estima por permutation importance sobre una muestra del entrenamiento
-    from sklearn.inspection import permutation_importance
-    n_sample = min(2000, len(X))
-    idx_sample = np.random.default_rng(42).choice(len(X), n_sample, replace=False)
-    pi = permutation_importance(modelo, X.iloc[idx_sample], y[idx_sample],
-                                n_repeats=5, random_state=42, scoring='neg_mean_absolute_error')
-    importances = dict(zip(cols, pi.importances_mean))
+    if calcular_importancias:
+        # HistGradientBoostingRegressor no expone feature_importances_: se estima por permutación sobre una
+        # muestra del entrenamiento. Solo bajo pedido (modo comparación / artículo): es lento.
+        extras['importancias'] = importancia_permutacion(modelo, X, y)
 
     # Incertidumbre: var = a·mu + b·mu² ajustada a los residuos de entrenamiento (sobredispersión de Poisson)
     mu_tr = np.clip(modelo.predict(X), 1e-6, None)
@@ -184,4 +204,4 @@ def pronosticar_gbm(panel_full, stock, fecha_fin, hs, log=print, inflacion_sigma
     disp_txt = 'con disponibilidad' if (not sin_stock and usar_disponibilidad) else 'sin disponibilidad'
     log(f'  Modelo GBM (Poisson, {disp_txt}): {len(X):,} observaciones de {len(cortes)} cortes semanales, '
         f'{len(out):,} SKU pronosticados.')
-    return out, importances
+    return out, extras
