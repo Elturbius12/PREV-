@@ -1242,6 +1242,42 @@ class VistaConfig(Vista):
             return
         self.app.toast('Parámetros guardados. Se aplican en el próximo análisis.', 'ok')
 
+    def _card_comparacion(self):
+        """Modo comparación de modelos: interruptores (se guardan al marcar/desmarcar)."""
+        from preve_config import ConfigError
+        cfg, app = dt.Config.actual(), self.app
+        card = Card(self.cont, padx=22, pady=18)
+        card.pack(fill='x', padx=S(PADX), pady=(0, S(12)))
+        label(card.body, 'Comparación de métodos de pronóstico', 11, 'bold').pack(anchor='w')
+        label(card.body, 'Opcional. Permite probar varios métodos de pronóstico con tus ventas pasadas y ver cuál '
+                         'acierta más en cada producto. Nada de esto cambia tus compras salvo la última opción.', 9,
+              color=TEXT_DIM, wraplength=S(700), justify='left').pack(anchor='w', pady=(0, S(8)))
+        opciones = (
+            ('habilitar_modo_comparacion', 'Mostrar el "Modo comparación" en la pantalla de backtesting'),
+            ('mostrar_metricas_avanzadas', 'Mostrar nombres técnicos de los métodos y métricas (modo avanzado)'),
+            ('usar_asignacion_modelos', 'Usar en los análisis el método que mejor funcionó para cada producto '
+                                        '(según la última comparación)'),
+        )
+        self.vars_comparacion = {}
+
+        def guardar(clave):
+            try:
+                cfg.set(clave, bool(self.vars_comparacion[clave].get()))
+            except ConfigError as e:
+                app.toast(f'No se guardó: {e}', 'error')
+                return
+            app.toast('Guardado. ' + ('Abre Backtesting para usarlo.' if clave == 'habilitar_modo_comparacion'
+                                      else 'Se aplica en el próximo análisis.'), 'ok')
+        for clave, texto in opciones:
+            self.vars_comparacion[clave] = tk.BooleanVar(value=bool(cfg.get(clave)))
+            tk.Checkbutton(card.body, text=texto, variable=self.vars_comparacion[clave], font=f(9), bg=SURFACE,
+                           activebackground=SURFACE, anchor='w', command=lambda c=clave: guardar(c)
+                           ).pack(anchor='w', pady=(S(4), 0))
+        n = len(cfg.db.mapa_asignacion_modelos(app.sucursal)) if getattr(app, 'sucursal', None) else 0
+        label(card.body, f'Productos con un método elegido en {app.sucursal}: {n:,}.' if n else
+              'Todavía no hay una comparación guardada: los análisis usan el método de siempre.', 9,
+              color=TEXT_MUTED).pack(anchor='w', pady=(S(6), 0))
+
     def _card_depurar(self):
         """
         Fase 8: botón para borrar toda la data histórica y empezar de cero.
@@ -1322,6 +1358,7 @@ class VistaConfig(Vista):
         self._card_categorias()
         self._card_erp()
         self._card_parametros()
+        self._card_comparacion()
         self._card_depurar()
 
         card = Card(self.cont, padx=22, pady=18)
