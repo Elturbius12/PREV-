@@ -291,9 +291,11 @@ function renderTable(){
     const isRev = (r.revisar_antes_de_comprar===true || r.revisar_antes_de_comprar==='True' || r.revisar_antes_de_comprar==='true');
     const accion = r.accion || r.decision || '—';
     const motivo = r.motivo_accion || r.explicacion || '—';
+    const nota = String(r.nota_producto || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+    const menosConf = (r.alerta_censura===true || r.alerta_censura==='True' || r.alerta_censura==='true');
     return `<tr>
       <td class="sku">${r.sku}</td>
-      <td class="name">${r.nombre}${isRev?' <span class="flag">REVISAR</span>':''}</td>
+      <td class="name">${r.nombre}${isRev?' <span class="flag">REVISAR</span>':''}${menosConf?' <span class="flag" title="'+nota+'">MENOR CONFIANZA</span>':''}</td>
       <td>${r.categoria||'—'}</td>
       <td>${r.proveedor_principal||'—'}</td>
       <td>${r.clase_abc||'—'}</td>
@@ -303,7 +305,7 @@ function renderTable(){
       <td class="num mono">${fmt(r.compra_sugerida_unid)}</td>
       <td class="num mono">${fmtMoney(r.costo_total_compra_pen)}</td>
       <td>${prioridadChip(r)}</td>
-      <td><span class="pill ${pillClass(accion)}">${accion}</span></td>
+      <td><span class="pill ${pillClass(accion)}" title="${nota}">${accion}</span></td>
       <td class="explic">${motivo}</td>
     </tr>`;
   }).join('');

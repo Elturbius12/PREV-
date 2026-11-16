@@ -129,8 +129,10 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
         progreso(f'⚠ No se pudo generar el Excel de clasificación: {e}')
 
     progreso('Paso 5/7 — Entrenando los modelos de pronóstico (puede tardar unos minutos)...')
-    pronostico, sin_pronostico, extras_modelo = entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin,
-                                                                       progreso, params=params, stock=stock)
+    pronostico, sin_pronostico, extras_modelo = entrenar_y_pronosticar(
+        panel_full, segmentacion, dim, fecha_fin, progreso, params=params, stock=stock, devolver_extras=True,
+        sucursal=sucursal)
+    _guardar_importancias(extras_modelo.get('importancias'), carpeta_p, progreso)
 
     # ══════════════════════════════════════════════════════════════════
     # REPORTE DEL CICLO PRINCIPAL (el de mayor horizonte; en Yuju: internacional, 141 días)
@@ -227,6 +229,20 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
     return rec_int
 
 
+NOMBRE_IMPORTANCIAS_CSV = 'importancia_variables.csv'
+
+
+def _guardar_importancias(importancias, carpeta_periodo, log):
+    """importancia_variables.csv (solo si `calcular_importancias_gbm` está activo y el modelo se entrenó)."""
+    if importancias is None or not len(importancias):
+        return
+    from preve_traducciones import traducir_variable
+    df = importancias.assign(descripcion=[traducir_variable(v) for v in importancias['variable']])
+    ruta = os.path.join(carpeta_periodo, NOMBRE_IMPORTANCIAS_CSV)
+    df[['variable', 'descripcion', 'importancia']].to_csv(ruta, index=False, encoding='utf-8-sig')
+    log(f'Importancia de variables del modelo principal: {ruta}')
+
+
 def _guardar_pedidos_atipicos(registros, fecha_datos, carpeta_periodo, log, dias=90):
     """pedidos_atipicos.csv: los pedidos atípicos (mayoristas) de los últimos `dias` días: fecha, producto, cliente,
     unidades. No se pronostican; el informe de compras los lista aparte para comprarlos contra pedido."""
@@ -285,18 +301,17 @@ def _generar_clasificacion(segmentacion, dim, stock, carpeta_salida, log):
     orden_abc = {'A': 0, 'B': 1, 'C': 2}
     seg = seg.assign(_o=seg['clase_abc'].map(orden_abc)).sort_values(['_o', 'margen_total'],
                                                                        ascending=[True, False])
-    from preve_traducciones import traducir_modelo, traducir_segmento
-    from preve_config import Config
-    _avanzado = Config.actual().get('mostrar_metricas_avanzadas')
-    seg['modelo_negocio'] = seg['modelo_asignado'].apply(lambda x: traducir_modelo(x, _avanzado))
-    seg['segmento_negocio'] = seg['segmento'].apply(lambda x: traducir_segmento(x, _avanzado))
+    from preve_traducciones import agregar_columnas_negocio
+    _avanzado = bool(Config.actual().get('mostrar_metricas_avanzadas'))
+    seg = agregar_columnas_negocio(seg, _avanzado)
     cols = [('sku', 'SKU (código de barra)'), ('nombre', 'Producto'), ('categoria', 'Categoría'),
-            ('segmento_negocio' if not _avanzado else 'segmento', 'Grupo'),
-            ('modelo_negocio' if not _avanzado else 'modelo_asignado', 'Modelo de pronóstico'),
-            ('clase_abc', 'Clase ABC'),
-            ('adi', 'ADI'), ('cv2', 'CV²'), ('semanas_observables', 'Semanas observadas'),
-            ('semanas_con_venta', 'Semanas con venta'), ('stock_actual', 'Stock actual (reconstruido)'),
-            ('margen_total', 'Margen acumulado (S/)')]
+            ('segmento_negocio', 'Grupo'), ('modelo_negocio', 'Modelo de pronóstico'),
+            ('clase_abc', 'Clase ABC')]
+    if _avanzado:                    # ADI / CV² son métricas técnicas: solo en modo avanzado
+        cols += [('adi', 'ADI'), ('cv2', 'CV²')]
+    cols += [('semanas_observables', 'Semanas observadas'),
+             ('semanas_con_venta', 'Semanas con venta'), ('stock_actual', 'Stock actual (reconstruido)'),
+             ('margen_total', 'Margen acumulado (S/)')]
     cols = [(c, t) for c, t in cols if c in seg.columns]
     datos = seg[[c for c, _ in cols]].copy()
     for c in ('adi', 'cv2', 'margen_total'):
@@ -320,13 +335,16 @@ def _generar_clasificacion(segmentacion, dim, stock, carpeta_salida, log):
         c = ws.cell(row=r, column=j, value=h)
         c.font, c.fill = encabezado['font'], encabezado['fill']
     total = max(len(seg), 1)
+    from preve_traducciones import traducir_modelo, traducir_segmento
     for nombre, modelo, desc in GRUPOS_EXPLICACION:
         r += 1
         n = int((seg['segmento'] == nombre).sum())
-        ws.cell(row=r, column=1, value=nombre)
+        if not _avanzado:            # sin siglas técnicas (ADI/CV²) ni nombres de modelo
+            desc = desc.replace(' (ADI ≤ 1.32 y CV² ≤ 0.49)', '')
+        ws.cell(row=r, column=1, value=traducir_segmento(nombre, _avanzado))
         ws.cell(row=r, column=2, value=n)
         ws.cell(row=r, column=3, value=round(n / total, 3)).number_format = '0.0%'
-        ws.cell(row=r, column=4, value=modelo)
+        ws.cell(row=r, column=4, value=traducir_modelo(modelo, _avanzado))
         ws.cell(row=r, column=5, value=desc).alignment = Alignment(wrap_text=True, vertical='top')
     r += 2
     ws.cell(row=r, column=1, value='Cruce Grupo × Clase ABC').font = Font(bold=True)
@@ -336,7 +354,7 @@ def _generar_clasificacion(segmentacion, dim, stock, carpeta_salida, log):
         c.font, c.fill = encabezado['font'], encabezado['fill']
     for nombre, _, _ in GRUPOS_EXPLICACION:
         r += 1
-        ws.cell(row=r, column=1, value=nombre)
+        ws.cell(row=r, column=1, value=traducir_segmento(nombre, _avanzado))
         for j, cl in enumerate(('A', 'B', 'C'), 2):
             ws.cell(row=r, column=j, value=int(((seg['segmento'] == nombre) & (seg['clase_abc'] == cl)).sum()))
     r += 2
@@ -623,24 +641,16 @@ def _generar_excel(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info_cic
     from openpyxl.worksheet.table import Table, TableStyleInfo
 
     ORANGE = '2D7D5F'   # acento verde salvia; el naranja de Yuju queda solo como banda del header de la app
-    # Traducir términos técnicos a lenguaje de negocio
-    from preve_traducciones import traducir_modelo, traducir_segmento, interpretar_wmape, nota_accion
-    from preve_config import Config
-    modo_avanzado = Config.actual().get('mostrar_metricas_avanzadas')
-    if 'modelo_asignado' in df.columns:
-        df['modelo_negocio'] = df['modelo_asignado'].apply(lambda x: traducir_modelo(x, modo_avanzado))
-    if 'segmento' in df.columns:
-        df['segmento_negocio'] = df['segmento'].apply(lambda x: traducir_segmento(x, modo_avanzado))
-    # Nota explicativa por acción + alerta de censura
-    if 'nota_confianza' not in df.columns:
-        df['nota_confianza'] = ''
-    df['nota_producto'] = df.apply(
-        lambda r: nota_accion(r.get('accion', ''), r.get('motivo_accion', ''), r.get('nota_confianza', '')), axis=1)
+    # Términos técnicos → lenguaje de negocio + nota del porqué de cada acción (sobre una COPIA: el DataFrame
+    # recibido lo siguen usando el dashboard, el CSV y la base)
+    from preve_traducciones import agregar_columnas_negocio
+    modo_avanzado = bool(Config.actual().get('mostrar_metricas_avanzadas'))
+    df = agregar_columnas_negocio(df, modo_avanzado)
     cols = {
         'sku': 'SKU (codigo de barra)', 'nombre': 'Nombre del producto', 'categoria': 'Categoria',
         'proveedor_principal': 'Proveedor principal',
         'clase_abc': 'Clase ABC (por margen)',
-        'modelo_negocio' if not modo_avanzado else 'modelo_asignado': 'Modelo usado',
+        'modelo_negocio': 'Modelo usado',
         'accion': 'ACCIÓN', 'motivo_accion': 'Motivo de la acción',
         'nota_producto': 'Nota explicativa',
         'stock_actual': 'Stock actual (reconstruido)', 'demanda_p50_141d': 'Demanda esperada (horizonte)',
@@ -894,20 +904,16 @@ def _generar_dashboard(df, sin_pron, carpeta_salida, log, etiqueta='FINAL', info
             txt += " ⚠ Esta cantidad parece inflada por una venta puntual fuera de lo común — revisa antes de comprar."
         return txt
 
-    df = df.copy()
+    from preve_traducciones import agregar_columnas_negocio
+    df = agregar_columnas_negocio(df, bool(Config.actual().get('mostrar_metricas_avanzadas')))   # copia
     df['explicacion'] = df.apply(_explicacion, axis=1)
-    # Agregar alerta de censura a la explicación
+    # Aviso de menor confianza (producto agotado buena parte de las últimas semanas)
     if 'nota_confianza' in df.columns:
         mask = df['nota_confianza'].fillna('').str.len() > 0
         df.loc[mask, 'explicacion'] = df.loc[mask, 'explicacion'] + ' ⚠ ' + df.loc[mask, 'nota_confianza']
-    # Usar nombre traducido del modelo para el usuario
-    if 'modelo_negocio' in df.columns:
-        col_modelo = 'modelo_negocio'
-    else:
-        col_modelo = 'modelo_asignado'
 
-    cols = ['sku', 'nombre', 'categoria', 'proveedor_principal', 'clase_abc', col_modelo,
-            'accion', 'motivo_accion', 'stock_actual',
+    cols = ['sku', 'nombre', 'categoria', 'proveedor_principal', 'clase_abc', 'modelo_asignado', 'modelo_negocio',
+            'accion', 'motivo_accion', 'nota_producto', 'alerta_censura', 'stock_actual',
             'demanda_p50_141d', 'rop', 'compra_sugerida_unid', 'decision', 'costo_total_compra_pen',
             'margen_pct', 'tendencia_venta',
             'revisar_antes_de_comprar', 'dato_incompleto', 'explicacion']
