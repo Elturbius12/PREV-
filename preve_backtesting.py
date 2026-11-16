@@ -36,6 +36,9 @@ COLUMNAS_PERIODO = {'sku': 'Código', 'nombre': 'Nombre', 'modelo': 'Modelo', 'c
                     'error_pct': 'Error %', 'bias': 'Bias'}
 
 
+SIN_DATO = 'Sin dato'
+
+
 class BacktestCancelado(Exception):
     pass
 
@@ -99,7 +102,7 @@ def pronosticador_pipeline(ventas_hasta, stock_hasta, dim, horizonte_dias, param
     from preve_pipeline import construir_panel_y_segmentacion, entrenar_y_pronosticar
     p = dataclasses.replace(params, horizonte_dias=float(horizonte_dias))
     panel, seg, fecha_fin = construir_panel_y_segmentacion(stock_hasta, ventas_hasta, dim, log, params=p)
-    pron, _, _extras = entrenar_y_pronosticar(panel, seg, dim, fecha_fin, log, params=p, stock=stock_hasta)
+    pron, _ = entrenar_y_pronosticar(panel, seg, dim, fecha_fin, log, params=p, stock=stock_hasta)
     pron = pron.merge(seg[['sku', 'modelo_asignado', 'segmento']], on='sku', how='left')
     return pron, panel, seg, fecha_fin
 
@@ -153,6 +156,18 @@ def resumir_completo(df):
     out.update({k: v for k, v in r.items() if k != 'wmape'})
     out['muestras_con_stock'] = int(df['con_stock'].sum()) if tiene else 0
     return out
+
+
+def desagregar(df, por):
+    """Una fila por grupo (columnas `por`, p. ej. ['clase_abc'] o ['clasificacion', 'modelo']) con
+    resumir_completo (WMAPE, MAE, Bias, …) y la cantidad de productos. Vacío si falta alguna columna."""
+    if df.empty or any(c not in df.columns for c in por):
+        return pd.DataFrame(columns=list(por))
+    filas = []
+    for clave, g in df.groupby(por, dropna=False):
+        clave = clave if isinstance(clave, tuple) else (clave,)
+        filas.append(dict(zip(por, clave), **resumir_completo(g), productos=int(g['sku'].nunique())))
+    return pd.DataFrame(filas).sort_values(list(por)).reset_index(drop=True)
 
 
 def _pc(x):
@@ -263,6 +278,10 @@ class Backtester:
         df['nombre'] = df['sku'].map(dim['nombre']) if 'nombre' in dim.columns else ''
         df['modelo'] = df['modelo_asignado']
         df['clasificacion'] = df['segmento']
+        # clase ABC de la segmentación de esta ventana (con los datos visibles en t), para el desglose por ABC
+        abc = seg.set_index('sku')['clase_abc'] if seg is not None and 'clase_abc' in seg.columns else pd.Series(
+            dtype=object)
+        df['clase_abc'] = df['sku'].map(abc).fillna(SIN_DATO)
         df['periodo_inicio'], df['periodo_fin'] = t, fin - pd.Timedelta(days=1)
         return df, {'productos_sin_pronostico': int(sin_pronostico),
                     'productos_sin_primera_venta': int(len(primera) - len(elegibles))}
@@ -326,8 +345,12 @@ class Backtester:
         return rec, resumen
 
     # ── ejecución ──────────────────────────────────────────
-    def run(self, fecha_inicio, fecha_fin, simular_compras=True):
-        """Walk-forward en el rango + simulación de compras; guarda en la base y exporta el Excel."""
+    def run(self, fecha_inicio, fecha_fin, simular_compras=True, persistir=True):
+        """Walk-forward en el rango + simulación de compras; guarda en la base y exporta el Excel.
+
+        persistir=False: solo calcula (no escribe en la base ni crea el Excel; ruta_excel y ejecucion_id quedan
+        en None). Lo usa el modo comparación, que evalúa muchos modelos y exporta un único Excel propio.
+        """
         t0 = datetime.datetime.now()
         fecha_fin = min(pd.Timestamp(fecha_fin), self.datos.ultima_fecha)
         ventanas = self.ventanas(fecha_inicio, fecha_fin)
@@ -374,17 +397,20 @@ class Backtester:
                          f'{res["horizonte"]} días con ventas reales)')
         if not periodos:
             raise ValueError('Ninguna ventana tuvo datos suficientes para evaluar el pronóstico.')
-        self.progreso(0.97, 'Guardando resultados…')
+        if not any(len(df) for *_, df in periodos):
+            raise ValueError('El modelo no generó pronóstico para ningún producto en ninguna ventana '
+                             '(p. ej. CatBoost necesita más de 30 productos con historia para entrenar).')
+        self.progreso(0.97, 'Guardando resultados…' if persistir else 'Consolidando resultados…')
         resultado = self._consolidar(periodos, omitidas, extras, compras, resumen_compras)
-        resultado['ruta_excel'] = exportar_excel(resultado, self.carpeta_salida)
-        resultado['ejecucion_id'] = self._guardar(resultado, fecha_inicio, fecha_fin)
+        resultado['ruta_excel'] = exportar_excel(resultado, self.carpeta_salida) if persistir else None
+        resultado['ejecucion_id'] = self._guardar(resultado, fecha_inicio, fecha_fin) if persistir else None
         resultado['duracion_s'] = (datetime.datetime.now() - t0).total_seconds()
         self.progreso(1.0, 'Listo')
         g = resultado['global']
         self.log(f'Backtesting terminado: {resultado["total_productos"]:,} productos, {resultado["total_periodos"]} '
                  f'períodos · {ETIQ_WMAPE} {_pc(g["wmape"])} · {ETIQ_WMAPE_TOTAL} {_pc(g["wmape_total"])} · '
-                 f'{ETIQ_WMAPE_STOCK} {_pc(g["wmape_con_stock"])} · MAPE {_pc(g["mape"])} ({NOTA_MAPE}) '
-                 f'→ {resultado["ruta_excel"]}')
+                 f'{ETIQ_WMAPE_STOCK} {_pc(g["wmape_con_stock"])} · MAPE {_pc(g["mape"])} ({NOTA_MAPE})'
+                 + (f' → {resultado["ruta_excel"]}' if persistir else ''))
         return resultado
 
     def _consolidar(self, periodos, omitidas, extras, compras, resumen_compras):
@@ -400,32 +426,12 @@ class Backtester:
         glob = resumir_completo(todo)
         glob['real_total'], glob['atipico'] = float(todo['real_total'].sum()), float(todo['atipico'].sum())
 
-        # Métricas desagregadas por segmento ADI/CV², clase ABC y modelo (Cambio 5)
-        por_segmento = pd.DataFrame([dict(segmento=s, **resumir_completo(g), productos=g['sku'].nunique())
-                                     for s, g in todo.groupby('clasificacion') if len(g) > 0]
-                                    ).sort_values('segmento') if 'clasificacion' in todo.columns else pd.DataFrame()
-        if 'modelo_asignado' not in todo.columns:
-            todo_abc = todo.merge(
-                self.datos.dim[['sku']].assign(clase_abc='Sin dato') if 'clase_abc' not in todo.columns else
-                todo[['sku', 'clase_abc']].drop_duplicates(), on='sku', how='left')
-        else:
-            todo_abc = todo
-        # Enriquecer con clase_abc desde la segmentación si no está
-        if 'clase_abc' not in todo_abc.columns:
-            from preve_pipeline import construir_panel_y_segmentacion
-            todo_abc['clase_abc'] = 'Sin dato'
-        por_clase_abc = pd.DataFrame([dict(clase_abc=c, **resumir_completo(g), productos=g['sku'].nunique())
-                                      for c, g in todo_abc.groupby('clase_abc') if len(g) > 0]
-                                     ).sort_values('clase_abc') if 'clase_abc' in todo_abc.columns else pd.DataFrame()
-        # Cruce: segmento × modelo
-        por_seg_modelo = pd.DataFrame([
-            dict(segmento=s, modelo=m, **resumir_completo(g), productos=g['sku'].nunique())
-            for (s, m), g in todo.groupby(['clasificacion', 'modelo']) if len(g) > 0
-        ]).sort_values(['segmento', 'modelo']) if 'clasificacion' in todo.columns else pd.DataFrame()
-
+        # Métricas desagregadas por segmento ADI/CV², clase ABC y modelo (WMAPE/MAE/Bias reales de cada grupo)
         return {'sucursal': self.sucursal, 'ventana_dias': self.ventana_dias, 'global': glob,
-                'por_segmento': por_segmento, 'por_clase_abc': por_clase_abc,
-                'por_segmento_modelo': por_seg_modelo,
+                'por_segmento': desagregar(todo, ['clasificacion']).rename(columns={'clasificacion': 'segmento'}),
+                'por_clase_abc': desagregar(todo, ['clase_abc']),
+                'por_segmento_modelo': desagregar(todo, ['clasificacion', 'modelo']).rename(
+                    columns={'clasificacion': 'segmento'}),
                 'mape_promedio': glob['mape'], 'excluye_atipicos': self._excluye_atipicos(), 'total_productos': int(todo['sku'].nunique()),
                 'total_periodos': len(periodos), 'periodos': periodos, 'detalle': todo, 'por_modelo': por_modelo,
                 'evolucion': evolucion, 'peores': evaluables.nlargest(20, 'error_pct'),
@@ -477,41 +483,85 @@ def _formatear(ws, anchos=None):
     ws.freeze_panes = 'A2'
 
 
-def exportar_excel(r, carpeta):
-    """reportes_backtesting/backtesting_YYYY-MM-DD_HH-MM.xlsx con las hojas de 6.3."""
+def _modo_avanzado():
+    from preve_config import Config
+    return bool(Config.actual().get('mostrar_metricas_avanzadas'))
+
+
+def _traducir_tabla(df, avanzado):
+    """COPIA de df con los nombres de modelo / segmento traducidos (salvo en modo avanzado)."""
+    from preve_traducciones import traducir_modelo, traducir_segmento
+    out = df.copy()
+    if avanzado:
+        return out
+    for col in ('modelo', 'modelo_asignado'):
+        if col in out.columns:
+            out[col] = [traducir_modelo(x) for x in out[col]]
+    for col in ('clasificacion', 'segmento'):
+        if col in out.columns:
+            out[col] = [traducir_segmento(x) for x in out[col]]
+    return out
+
+
+def exportar_excel(r, carpeta, avanzado=None):
+    """reportes_backtesting/backtesting_YYYY-MM-DD_HH-MM.xlsx con las hojas de 6.3.
+
+    Sin `mostrar_metricas_avanzadas` (avanzado=None lee la configuración) los nombres de modelo y de segmento se
+    muestran en lenguaje de negocio y el WMAPE como "Margen de error estimado" con su interpretación.
+    """
+    from preve_traducciones import ETIQUETA_ERROR, interpretar_wmape
+    avanzado = _modo_avanzado() if avanzado is None else avanzado
     os.makedirs(carpeta, exist_ok=True)
     ruta = os.path.join(carpeta, f'backtesting_{datetime.datetime.now():%Y-%m-%d_%H-%M}.xlsx')
     g = r['global']
+
+    def interp(x):
+        return interpretar_wmape(x)[2]
     general = pd.DataFrame([
-        ('Sucursal', r['sucursal']), ('Ventana (días)', r['ventana_dias']),
-        ('Productos evaluados', r['total_productos']), ('Períodos evaluados', r['total_periodos']),
-        ('Períodos omitidos (datos insuficientes)', len(r['omitidas'])),
-        (ETIQ_WMAPE + ' (%) — indicador principal', _r(g['wmape'], 2)),
-        (ETIQ_WMAPE_TOTAL + ' (%) — contra todo lo vendido, con pedidos atípicos', _r(g['wmape_total'], 2)),
-        (ETIQ_WMAPE_STOCK + ' (%) — solo productos con stock al inicio de la ventana', _r(g['wmape_con_stock'], 2)),
-        ('Unidades vendidas (total)', _r(g.get('real_total'), 0)),
-        ('Unidades en pedidos atípicos', _r(g.get('atipico'), 0)),
-        ('MAE (u)', round(g['mae'], 3)), ('RMSE (u)', round(g['rmse'], 3)), ('Bias medio (u)', round(g['bias'], 3)),
-        ('MAPE promedio (%) — ' + NOTA_MAPE, _r(g['mape'], 2)),
-    ], columns=['Métrica', 'Valor'])
-    renombre_metricas = {'wmape': ETIQ_WMAPE, 'wmape_total': ETIQ_WMAPE_TOTAL, 'wmape_con_stock': ETIQ_WMAPE_STOCK,
-                         'mape': 'MAPE (' + NOTA_MAPE + ')'}
+        (ETIQUETA_ERROR + ' (%) — en palabras simples', _r(g['wmape'], 2), interp(g['wmape'])),
+        ('Sucursal', r['sucursal'], ''), ('Ventana (días)', r['ventana_dias'], ''),
+        ('Productos evaluados', r['total_productos'], ''), ('Períodos evaluados', r['total_periodos'], ''),
+        ('Períodos omitidos (datos insuficientes)', len(r['omitidas']), ''),
+        (ETIQ_WMAPE + ' (%) — indicador principal', _r(g['wmape'], 2), interp(g['wmape'])),
+        (ETIQ_WMAPE_TOTAL + ' (%) — contra todo lo vendido, con pedidos atípicos', _r(g['wmape_total'], 2),
+         interp(g['wmape_total'])),
+        (ETIQ_WMAPE_STOCK + ' (%) — solo productos con stock al inicio de la ventana', _r(g['wmape_con_stock'], 2),
+         interp(g['wmape_con_stock'])),
+        ('Unidades vendidas (total)', _r(g.get('real_total'), 0), ''),
+        ('Unidades en pedidos atípicos', _r(g.get('atipico'), 0), ''),
+        ('MAE (u)', round(g['mae'], 3), 'Error promedio por producto y período, en unidades.'),
+        ('RMSE (u)', round(g['rmse'], 3), ''),
+        ('Bias medio (u)', round(g['bias'], 3), 'Positivo: el sistema pronostica de más; negativo: de menos.'),
+        ('MAPE promedio (%) — ' + NOTA_MAPE, _r(g['mape'], 2), ''),
+    ], columns=['Métrica', 'Valor', 'Interpretación'])
+    if avanzado:
+        renombre_metricas = {'wmape': ETIQ_WMAPE, 'wmape_total': ETIQ_WMAPE_TOTAL,
+                             'wmape_con_stock': ETIQ_WMAPE_STOCK, 'mape': 'MAPE (' + NOTA_MAPE + ')'}
+    else:
+        renombre_metricas = {'wmape': ETIQUETA_ERROR + ' (demanda al detalle, %)',
+                             'wmape_total': ETIQUETA_ERROR + ' (venta total, %)',
+                             'wmape_con_stock': ETIQUETA_ERROR + ' (productos con stock, %)',
+                             'mae': 'Error promedio (u)', 'rmse': 'Error típico (u)',
+                             'bias': 'Sesgo (+ de más, − de menos)',
+                             'mape': 'Error porcentual promedio (' + NOTA_MAPE + ')'}
     tabla_sku = {'sku': 'Código', 'nombre': 'Nombre', 'modelo': 'Modelo', 'periodos': 'Períodos',
                  'pronostico': 'Pronóstico total', 'real': 'Real total', 'error_pct': 'Error % medio'}
     with pd.ExcelWriter(ruta, engine='openpyxl') as xw:
         general.to_excel(xw, sheet_name='Resumen General', index=False)
         titulos, fila = [], len(general) + 2           # fila 0-based donde va el próximo título
         for titulo, df in (('Evolución por período', r['evolucion'].rename(columns=renombre_metricas)),
-                           ('Comparación por modelo', r['por_modelo'].rename(columns=renombre_metricas)),
-                           ('Top 20 peor pronóstico (productos con 2+ períodos)', r['peores'].rename(columns=tabla_sku)),
-                           ('Top 20 mejor pronóstico', r['mejores'].rename(columns=tabla_sku))):
+                           ('Comparación por modelo',
+                            _traducir_tabla(r['por_modelo'], avanzado).rename(columns=renombre_metricas)),
+                           ('Top 20 peor pronóstico (productos con 2+ períodos)',
+                            _traducir_tabla(r['peores'], avanzado).rename(columns=tabla_sku)),
+                           ('Top 20 mejor pronóstico', _traducir_tabla(r['mejores'], avanzado).rename(columns=tabla_sku))):
             titulos.append((fila + 1, titulo))
             df.round(2).to_excel(xw, sheet_name='Resumen General', index=False, startrow=fila + 1)
             fila += len(df) + 4
-        r['por_modelo'].rename(columns=renombre_metricas).round(2).to_excel(xw, sheet_name='Resumen por Modelo',
-                                                                              index=False)
+        _traducir_tabla(r['por_modelo'], avanzado).rename(columns=renombre_metricas).round(2).to_excel(
+            xw, sheet_name='Resumen por Modelo', index=False)
         for i, (_, t, fin, df) in enumerate(r['periodos'], 1):
-            df[list(COLUMNAS_PERIODO)].rename(columns=COLUMNAS_PERIODO).round(2).to_excel(
+            _traducir_tabla(df[list(COLUMNAS_PERIODO)], avanzado).rename(columns=COLUMNAS_PERIODO).round(2).to_excel(
                 xw, sheet_name=_nombre_hoja(i, t, fin), index=False)
         if r['compras'] is not None:
             cols = {'dia_reporte': 'Día de reporte', 'sku': 'Código', 'nombre': 'Nombre', 'accion': 'Acción',
@@ -526,177 +576,319 @@ def exportar_excel(r, carpeta):
                                           startcol=len(cols) + 1)
         if len(r['omitidas']):
             r['omitidas'].to_excel(xw, sheet_name='Ventanas omitidas', index=False)
-        # Hoja de métricas desagregadas por segmento/ABC/modelo (Cambio 5)
-        _desag_rename = {'wmape': ETIQ_WMAPE, 'wmape_total': ETIQ_WMAPE_TOTAL,
-                         'wmape_con_stock': ETIQ_WMAPE_STOCK, 'mape': 'MAPE'}
-        desag_fila = 0
-        desag_titulos = []
-        for titulo, clave in (('Por segmento ADI/CV²', 'por_segmento'),
-                              ('Por clase ABC', 'por_clase_abc'),
-                              ('Por segmento × modelo', 'por_segmento_modelo')):
-            df_d = r.get(clave)
-            if df_d is not None and len(df_d):
-                desag_titulos.append((desag_fila + 1, titulo))
-                df_d.rename(columns=_desag_rename).round(2).to_excel(
-                    xw, sheet_name='Métricas por Segmento', index=False, startrow=desag_fila + 1)
-                desag_fila += len(df_d) + 4
+        # Hoja de métricas desagregadas por segmento ADI/CV², clase ABC y segmento × modelo
+        _escribir_desagregadas(xw, r, renombre_metricas, avanzado)
         wb = xw.book
-        if 'Métricas por Segmento' in wb.sheetnames:
-            from openpyxl.styles import Font as _Font
-            hoja_seg = wb['Métricas por Segmento']
-            for ft, txt in desag_titulos:
-                hoja_seg.cell(row=ft, column=1, value=txt).font = _Font(bold=True, size=12, color='2D7D5F')
         from openpyxl.styles import Font
         hoja_gen = wb['Resumen General']
         for fila_titulo, texto in titulos:            # 1-based: la fila libre justo encima de cada tabla
             hoja_gen.cell(row=fila_titulo, column=1, value=texto).font = Font(bold=True, size=12, color='2D7D5F')
         for ws in wb.worksheets:
-            _formatear(ws, {1: 44} if ws.title == 'Resumen General' else None)
+            _formatear(ws, {1: 44, 3: 70} if ws.title == 'Resumen General' else None)
     return ruta
 
 
+HOJA_DESAGREGADA = 'Métricas por Segmento'
+
+
+def _escribir_desagregadas(xw, r, renombre_metricas, avanzado, hoja=HOJA_DESAGREGADA):
+    """Tablas por segmento ADI/CV², por clase ABC y por segmento × modelo en una sola hoja, con título."""
+    from openpyxl.styles import Font
+    fila, titulos = 0, []
+    for titulo, clave in (('Por segmento ADI/CV²' if avanzado else 'Por tipo de venta', 'por_segmento'),
+                          ('Por clase ABC', 'por_clase_abc'),
+                          ('Por segmento × modelo' if avanzado else 'Por tipo de venta y método',
+                           'por_segmento_modelo')):
+        df_d = r.get(clave)
+        if df_d is not None and len(df_d):
+            titulos.append((fila + 1, titulo))
+            _traducir_tabla(df_d, avanzado).rename(columns=renombre_metricas).round(2).to_excel(
+                xw, sheet_name=hoja, index=False, startrow=fila + 1)
+            fila += len(df_d) + 4
+    if hoja in xw.book.sheetnames:
+        for ft, txt in titulos:
+            xw.book[hoja].cell(row=ft, column=1, value=txt).font = Font(bold=True, size=12, color='2D7D5F')
+
+
 # ══════════════════════════════════════════════════════════════════
-# Comparación multi-modelo y selección automática (Cambio 4)
+# Comparación multi-modelo y selección automática por SKU (modo comparación)
 # ══════════════════════════════════════════════════════════════════
-def comparar_modelos(datos, fecha_inicio, fecha_fin, params=None, modelos=None,
-                     plantilla=None, ventana_dias=None, sucursal='San José',
-                     ciclo=None, log=log_info, progreso=None, cancelar=None, db=None,
-                     carpeta_salida=None):
-    """Corre el backtesting walk-forward con CADA modelo y selecciona el mejor por SKU.
+CRITERIO_WMAPE = 'Menor WMAPE (desempate: menor MAE)'
+CRITERIO_MAE = 'Menor MAE (sin ventas en los períodos evaluados: el WMAPE no existe)'
+NOTAS_COMPARACION = [
+    ('WMAPE por SKU y modelo', 'Σ|pronóstico − real| / Σ real × 100, sumando todos los períodos evaluados.'),
+    ('MAE', 'Promedio de |pronóstico − real| por período (unidades).'),
+    ('Bias', 'Promedio de (pronóstico − real) por período: + sobreestima, − subestima.'),
+    ('Selección', 'Por SKU gana el menor WMAPE; si empatan, el menor MAE; si siguen empatados, el primero en el '
+                  'orden de modelos de la comparación.'),
+    ('Σ real = 0', 'Si el SKU no vendió nada en los períodos evaluados el WMAPE no existe: se elige por MAE (el '
+                   'que más se acercó a 0) y la confianza queda "Sin dato".'),
+    ('Base común por SKU', 'Solo compiten los modelos que pronosticaron el SKU en todos sus períodos evaluados (un '
+                           'modelo que no pudo pronosticar alguna ventana no compite con menos datos).'),
+    ('WMAPE base común', 'WMAPE global de cada modelo sobre los pares (SKU, período) que TODOS los modelos '
+                         'pronosticaron: es la comparación global justa.'),
+    ('Confianza', 'Alta: WMAPE ≤ 30 %; Media: ≤ 60 %; Baja: > 60 %; Sin dato: Σ real = 0 (preve_traducciones).'),
+]
 
-    Retorna dict con:
-      - 'resultados_por_modelo': {nombre_modelo: resultado_backtesting}
-      - 'mejor_por_sku': DataFrame [sku, mejor_modelo, wmape_mejor, confianza]
-      - 'comparacion': DataFrame con WMAPE de cada modelo por SKU
-      - 'ruta_excel': ruta del Excel consolidado
-    """
-    from preve_modelos_baseline import MODELOS_DISPONIBLES
 
-    if modelos is None:
-        modelos_dict = {'Pipeline (producción)': pronosticador_pipeline}
-        modelos_dict.update(MODELOS_DISPONIBLES)
-    else:
-        todos = {'Pipeline (producción)': pronosticador_pipeline}
-        todos.update(MODELOS_DISPONIBLES)
-        modelos_dict = {k: v for k, v in todos.items() if k in modelos}
+def metricas_por_sku_modelo(detalle):
+    """WMAPE, MAE y Bias reales por (sku, modelo). `detalle`: una fila por SKU × período × modelo con
+    pronostico y real. WMAPE = Σ|f − r| / Σr × 100; NaN si Σr = 0 (ver NOTAS_COMPARACION)."""
+    err = detalle['pronostico'] - detalle['real']
+    d = detalle.assign(_abs=err.abs(), _err=err)
+    m = (d.groupby(['sku', 'modelo'], sort=True)
+         .agg(suma_abs=('_abs', 'sum'), suma_real=('real', 'sum'), suma_pronostico=('pronostico', 'sum'),
+              mae=('_abs', 'mean'), bias=('_err', 'mean'), periodos=('real', 'size'))
+         .reset_index())
+    m['wmape'] = m['suma_abs'] / m['suma_real'].where(m['suma_real'] > 0) * 100
+    return m
 
-    resultados_por_modelo = {}
-    detalles_por_modelo = {}
-    total_modelos = len(modelos_dict)
 
-    for idx, (nombre, pronosticador) in enumerate(modelos_dict.items()):
-        if cancelar and cancelar():
-            break
-        log(f'\n═══ Modelo {idx + 1}/{total_modelos}: {nombre} ═══')
-        if progreso:
-            progreso(idx / total_modelos, f'Evaluando {nombre}...')
-        try:
-            bt = Backtester(datos, params=params, plantilla=plantilla, ventana_dias=ventana_dias,
-                            sucursal=sucursal, ciclo=ciclo, pronosticador=pronosticador, db=db,
-                            carpeta_salida=carpeta_salida, log=log, cancelar=cancelar or (lambda: False))
-            resultado = bt.run(fecha_inicio, fecha_fin, simular_compras=False)
-            resultados_por_modelo[nombre] = resultado
-            det = resultado['detalle'][['sku', 'pronostico', 'real', 'error_pct', 'bias']].copy()
-            det['modelo_eval'] = nombre
-            detalles_por_modelo[nombre] = det
-        except (ValueError, BacktestCancelado) as e:
-            log(f'  ⚠ {nombre}: {e}')
+def seleccionar_mejor_modelo(metricas, orden=None):
+    """Un modelo por SKU según NOTAS_COMPARACION. Devuelve sku, modelo, wmape, mae, bias, periodos, venta_real,
+    criterio, confianza y precision (texto de negocio). `orden`: lista de modelos para el último desempate."""
+    from preve_traducciones import nivel_confianza, texto_precision
+    import preve_modelos_baseline as mb
+    columnas = ['sku', 'modelo', 'wmape', 'mae', 'bias', 'periodos', 'venta_real', 'criterio', 'confianza',
+                'precision']
+    if metricas.empty:
+        return pd.DataFrame(columns=columnas)
+    m = metricas.copy()
+    m = m[m['periodos'] == m.groupby('sku')['periodos'].transform('max')]
+    pos = {n: i for i, n in enumerate(orden or mb.expandir_modelos(mb.MODELOS_COMPARABLES))}
+    m['_orden'] = [pos.get(n, len(pos)) for n in m['modelo']]
+    m = m.sort_values(['sku', 'wmape', 'mae', '_orden', 'modelo'], na_position='last')
+    mejor = m.groupby('sku', sort=True).head(1).reset_index(drop=True)
+    mejor['criterio'] = np.where(mejor['wmape'].notna(), CRITERIO_WMAPE, CRITERIO_MAE)
+    mejor['confianza'] = [nivel_confianza(w) for w in mejor['wmape']]
+    mejor['precision'] = [texto_precision(w) for w in mejor['wmape']]
+    return mejor.rename(columns={'suma_real': 'venta_real'})[columnas]
+
+
+def _wmape_base_comun(detalle, modelos):
+    """{modelo: WMAPE} sobre los (sku, período) pronosticados por todos los modelos."""
+    claves = detalle.groupby(['sku', 'periodo_inicio'])['modelo'].nunique()
+    comunes = set(claves[claves == len(modelos)].index)
+    if not comunes:
+        return {m: np.nan for m in modelos}
+    en_comun = [k in comunes for k in zip(detalle['sku'], detalle['periodo_inicio'])]
+    return {m: wmape(g) for m, g in detalle[en_comun].groupby('modelo')}
+
+
+def _importancias_comparacion(datos, fecha_fin, params, horizonte_dias, nombres, log):
+    """Importancia de variables del GBM (con y/o sin disponibilidad) entrenado con todos los datos hasta
+    `fecha_fin`. DataFrame modelo, variable, descripcion, importancia, segundos; vacío si no aplica."""
+    import time
+    import preve_modelos_baseline as mb
+    from preve_modelo_gbm import pronosticar_gbm
+    from preve_pipeline import construir_panel_y_segmentacion
+    from preve_traducciones import traducir_variable
+    variantes = [(n, n == mb.MODELO_GBM) for n in (mb.MODELO_GBM, mb.MODELO_GBM_SIN_DISP) if n in nombres]
+    if not variantes:
+        return pd.DataFrame()
+    ventas, stock = datos.hasta(pd.Timestamp(fecha_fin) + pd.Timedelta(days=1))
+    p = dataclasses.replace(params, horizonte_dias=float(horizonte_dias))
+    panel, _, ff = construir_panel_y_segmentacion(stock, ventas, datos.dim, lambda m: None, params=p)
+    tablas = []
+    for nombre, usar in variantes:
+        t0 = time.perf_counter()
+        _, ex = pronosticar_gbm(panel, stock, ff, p.horizonte_semanas, lambda m: None, usar_disponibilidad=usar,
+                                calcular_importancias=True, devolver_extras=True)
+        seg = time.perf_counter() - t0
+        if ex['importancias'] is None:
+            log(f'  Importancia de variables ({nombre}): historia insuficiente para entrenar el modelo.')
             continue
+        imp = ex['importancias'].assign(modelo=nombre, segundos=round(seg, 2))
+        imp['descripcion'] = [traducir_variable(v) for v in imp['variable']]
+        tablas.append(imp[['modelo', 'variable', 'descripcion', 'importancia', 'segundos']])
+        log(f'  Importancia de variables ({nombre}): calculada en {seg:.1f} s.')
+    return pd.concat(tablas, ignore_index=True) if tablas else pd.DataFrame()
 
-    if not detalles_por_modelo:
-        raise ValueError('Ningún modelo pudo completar el backtesting.')
 
-    # Consolidar: WMAPE por SKU por modelo
-    todos_det = pd.concat(detalles_por_modelo.values(), ignore_index=True)
-    pivot_error = todos_det.groupby(['sku', 'modelo_eval']).agg(
-        wmape=('error_pct', 'mean'),
-        bias=('bias', 'mean'),
-        periodos=('real', 'count')
-    ).reset_index()
+def comparar_modelos(datos, fecha_inicio, fecha_fin, params=None, modelos=None, plantilla=None, ventana_dias=None,
+                     sucursal='San José', ciclo=None, log=log_info, progreso=None, cancelar=None, db=None,
+                     carpeta_salida=None, pronosticadores=None, guardar_asignacion=True,
+                     calcular_importancias=True, etiqueta_modelo=None, log_detalle=None):
+    """Backtesting walk-forward de cada modelo y selección del mejor por SKU.
 
-    # Seleccionar el mejor modelo por SKU (menor WMAPE con al menos 2 períodos)
-    evaluables = pivot_error[pivot_error['periodos'] >= 2]
-    if evaluables.empty:
-        evaluables = pivot_error
-    mejor_idx = evaluables.groupby('sku')['wmape'].idxmin()
-    mejor = evaluables.loc[mejor_idx, ['sku', 'modelo_eval', 'wmape']].copy()
-    mejor.columns = ['sku', 'mejor_modelo', 'wmape_mejor']
+    modelos: nombres configurables (preve_modelos_baseline.MODELOS_COMPARABLES; None = todos). Los desconocidos se
+        omiten con aviso. El 'Promedio móvil' se expande con params.ventanas_promedio_movil.
+    pronosticadores: {nombre: función} para inyectar pronosticadores (tests); reemplaza a `modelos`.
+    etiqueta_modelo: función nombre -> texto para los mensajes de log y progreso (p. ej. traducir_modelo para el
+        usuario no técnico). log_detalle: log del backtesting de cada modelo (por defecto, `log`).
+    No escribe el Excel ni las métricas de cada modelo (Backtester.run(persistir=False)): solo crea el Excel de
+    comparación y, si guardar_asignacion, guarda el modelo elegido por SKU en la base (tabla asignacion_modelos).
 
-    # Confianza: basada en el WMAPE del mejor modelo
-    mejor['confianza'] = pd.cut(mejor['wmape_mejor'],
-                                bins=[-np.inf, 30, 60, np.inf],
-                                labels=['Alta', 'Media', 'Baja'])
+    Devuelve dict: modelos, resumen (por modelo), metricas_sku, mejor_por_sku, comparacion (pivote WMAPE),
+    detalle, por_segmento_modelo, por_clase_abc_modelo, importancias, fallidos, ruta_excel,
+    asignaciones_guardadas, duracion_s.
+    """
+    import preve_modelos_baseline as mb
+    from preve_config import ParametrosModelo
+    t0 = datetime.datetime.now()
+    params = params or ParametrosModelo()
+    cancelar = cancelar or (lambda: False)
+    progreso = progreso or (lambda f, t: None)
+    et = etiqueta_modelo or (lambda nombre: nombre)
+    log_detalle = log_detalle or log
+    if pronosticadores is None:
+        pedidos = list(mb.MODELOS_COMPARABLES) if modelos is None else list(modelos)
+        validos, desconocidos = mb.validar_modelos(pedidos)
+        if desconocidos:
+            log(f'⚠ Modelos desconocidos (se omiten): {", ".join(map(str, desconocidos))}. '
+                f'Válidos: {", ".join(mb.MODELOS_COMPARABLES)}')
+        if not validos:
+            raise ValueError('Ninguno de los modelos pedidos es válido.')
+        pronosticadores = {n: mb.pronosticador(n)
+                           for n in mb.expandir_modelos(validos, params.ventanas_promedio_movil)}
+    nombres = list(pronosticadores)
+    n = len(nombres)
+    log(f'Modo comparación: {n} métodos — {", ".join(et(x) for x in nombres)}')
 
-    # Tabla pivote: SKU × modelo → WMAPE
-    comparacion = pivot_error.pivot_table(index='sku', columns='modelo_eval', values='wmape').round(1)
+    detalles, globales, fallidos, horizonte = {}, {}, {}, None
+    for i, (nombre, fn) in enumerate(pronosticadores.items()):
+        if cancelar():
+            raise BacktestCancelado()
+        log(f'═══ Método {i + 1}/{n}: {et(nombre)} ═══')
 
-    log(f'\n═══ Resumen de comparación ═══')
-    for nombre in modelos_dict:
-        if nombre in resultados_por_modelo:
-            g = resultados_por_modelo[nombre]['global']
-            log(f'  {nombre}: WMAPE {_pc(g["wmape"])}')
-    conteo = mejor['mejor_modelo'].value_counts()
-    log(f'\nMejor modelo por SKU:')
-    for m, n in conteo.items():
-        log(f'  {m}: {n} SKU ({n / len(mejor) * 100:.0f}%)')
+        def prog(f, txt, i=i, nombre=nombre):
+            progreso(min(0.95, (i + min(max(f, 0.0), 1.0)) / n * 0.95), f'Método {i + 1}/{n} ({et(nombre)}): {txt}')
+        try:
+            bt = Backtester(datos, params=params, plantilla=plantilla, ventana_dias=ventana_dias, sucursal=sucursal,
+                            ciclo=ciclo, pronosticador=fn, db=db, carpeta_salida=carpeta_salida, log=log_detalle,
+                            progreso=prog, cancelar=cancelar)
+            horizonte = bt.ventana_dias
+            res = bt.run(fecha_inicio, fecha_fin, simular_compras=False, persistir=False)
+        except BacktestCancelado:
+            raise
+        except Exception as e:  # noqa: BLE001 — un modelo que falla no detiene la comparación; queda registrado
+            logger.exception('Falló el modelo %s en la comparación', nombre)
+            fallidos[nombre] = f'{type(e).__name__}: {e}'
+            log(f'  ⚠ {et(nombre)}: no se pudo evaluar ({fallidos[nombre]})')
+            continue
+        det = res['detalle'].copy()
+        det['modelo'] = nombre                       # el nombre del modelo comparado, en todas partes
+        detalles[nombre] = det
+        globales[nombre] = dict(res['global'], productos=res['total_productos'], periodos=res['total_periodos'])
+    if not detalles:
+        raise ValueError('Ningún modelo pudo completar el backtesting: '
+                         + '; '.join(f'{k}: {v}' for k, v in fallidos.items()))
 
-    resultado_final = {
-        'resultados_por_modelo': resultados_por_modelo,
-        'mejor_por_sku': mejor,
-        'comparacion': comparacion,
-        'detalle_completo': todos_det,
+    progreso(0.96, 'Eligiendo el mejor modelo para cada producto…')
+    detalle = pd.concat(detalles.values(), ignore_index=True)
+    metricas = metricas_por_sku_modelo(detalle)
+    mejor = seleccionar_mejor_modelo(metricas, orden=nombres)
+    nombres_prod = datos.dim.set_index('sku')['nombre'] if 'nombre' in datos.dim.columns else pd.Series(dtype=object)
+    mejor.insert(1, 'nombre', mejor['sku'].map(nombres_prod))
+    comunes = _wmape_base_comun(detalle, list(detalles))
+    conteo = mejor['modelo'].value_counts()
+    resumen = pd.DataFrame([{
+        'modelo': m, 'wmape': g['wmape'], 'wmape_base_comun': comunes.get(m, np.nan), 'wmape_total': g['wmape_total'],
+        'wmape_con_stock': g['wmape_con_stock'], 'mae': g['mae'], 'bias': g['bias'], 'productos': g['productos'],
+        'periodos': g['periodos'], 'sku_donde_es_el_mejor': int(conteo.get(m, 0))} for m, g in globales.items()])
+    importancias = pd.DataFrame()
+    if calcular_importancias:
+        try:
+            importancias = _importancias_comparacion(datos, min(pd.Timestamp(fecha_fin), datos.ultima_fecha),
+                                                     params, horizonte, nombres, log_detalle)
+        except Exception as e:  # noqa: BLE001 — es un anexo técnico, no debe impedir la comparación
+            logger.exception('No se pudo calcular la importancia de variables')
+            log(f'  ⚠ Importancia de variables: no se pudo calcular ({e})')
+    resultado = {
+        'sucursal': sucursal, 'modelos': list(detalles), 'resumen': resumen, 'metricas_sku': metricas,
+        'mejor_por_sku': mejor, 'detalle': detalle,
+        'comparacion': metricas.pivot_table(index='sku', columns='modelo', values='wmape').round(1),
+        'por_segmento_modelo': desagregar(detalle, ['clasificacion', 'modelo']).rename(
+            columns={'clasificacion': 'segmento'}),
+        'por_clase_abc_modelo': desagregar(detalle, ['clase_abc', 'modelo']),
+        'importancias': importancias, 'fallidos': fallidos,
     }
-
-    # Exportar Excel consolidado
-    ruta = _exportar_comparacion(resultado_final, modelos_dict.keys(),
-                                 carpeta_salida or os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                                CARPETA_REPORTES))
-    resultado_final['ruta_excel'] = ruta
-    log(f'\nExcel de comparación: {ruta}')
-
-    if progreso:
-        progreso(1.0, 'Comparación terminada')
-    return resultado_final
-
-
-def _exportar_comparacion(resultado, nombres_modelos, carpeta):
-    """Excel con la comparación multi-modelo."""
-    os.makedirs(carpeta, exist_ok=True)
-    ruta = os.path.join(carpeta, f'comparacion_modelos_{datetime.datetime.now():%Y-%m-%d_%H-%M}.xlsx')
-
-    mejor = resultado['mejor_por_sku']
-    comparacion = resultado['comparacion']
-
-    # Resumen global por modelo
-    resumen_modelos = []
-    for nombre, res in resultado['resultados_por_modelo'].items():
-        g = res['global']
-        resumen_modelos.append({
-            'Modelo': nombre, 'WMAPE (%)': _r(g['wmape'], 2),
-            'MAE': _r(g['mae'], 2), 'Bias': _r(g['bias'], 2),
-            'Productos': res['total_productos'], 'Períodos': res['total_periodos'],
-            'SKU donde es el mejor': int((mejor['mejor_modelo'] == nombre).sum()),
-        })
-    resumen_df = pd.DataFrame(resumen_modelos).sort_values('WMAPE (%)')
-
-    with pd.ExcelWriter(ruta, engine='openpyxl') as xw:
-        resumen_df.to_excel(xw, sheet_name='Resumen por Modelo', index=False)
-        mejor.to_excel(xw, sheet_name='Mejor Modelo por SKU', index=False)
-        comparacion.to_excel(xw, sheet_name='WMAPE por SKU y Modelo')
-        wb = xw.book
-        for ws in wb.worksheets:
-            _formatear(ws)
-    return ruta
+    carpeta = carpeta_salida or os.path.join(os.path.dirname(os.path.abspath(__file__)), CARPETA_REPORTES)
+    resultado['carpeta'] = carpeta
+    resultado['ruta_excel'] = exportar_comparacion(resultado, carpeta)
+    resultado['asignaciones_guardadas'] = (guardar_asignacion_modelos(mejor, sucursal, db)
+                                           if guardar_asignacion else 0)
+    resultado['duracion_s'] = (datetime.datetime.now() - t0).total_seconds()
+    log('Método elegido por producto: ' + ' · '.join(f'{et(m)}: {k}' for m, k in conteo.items()))
+    log(f'Excel de comparación (datos técnicos): {resultado["ruta_excel"]}'
+        + (f' · método guardado para {resultado["asignaciones_guardadas"]:,} productos' if guardar_asignacion else ''))
+    progreso(1.0, 'Comparación terminada')
+    return resultado
 
 
-def guardar_asignacion_modelos(mejor_por_sku, db=None):
-    """Guarda la asignación modelo→SKU en la base de datos.
+def guardar_asignacion_modelos(mejor_por_sku, sucursal, db=None):
+    """Guarda en la base (tabla asignacion_modelos) el modelo elegido por SKU. Devuelve las filas guardadas.
 
-    mejor_por_sku: DataFrame con columnas [sku, mejor_modelo].
+    mejor_por_sku: DataFrame de seleccionar_mejor_modelo (sku, modelo, wmape, mae, bias, periodos, confianza).
     """
     if db is None:
         from database import Database
         db = Database.default()
-    for _, row in mejor_por_sku.iterrows():
-        db.ejecutar('UPDATE productos SET modelo_asignado = :modelo WHERE codigo_barras = :sku',
-                    {'modelo': row['mejor_modelo'], 'sku': row['sku']})
+    return db.guardar_asignacion_modelos(sucursal, mejor_por_sku)
+
+
+def exportar_comparacion(r, carpeta):
+    """Excel TÉCNICO de la comparación (para análisis / el artículo): métricas con sus nombres técnicos."""
+    os.makedirs(carpeta, exist_ok=True)
+    ruta = os.path.join(carpeta, f'comparacion_modelos_{datetime.datetime.now():%Y-%m-%d_%H-%M}.xlsx')
+    cols_res = {'modelo': 'Modelo', 'wmape': 'WMAPE (%)', 'wmape_base_comun': 'WMAPE base común (%)',
+                'wmape_total': 'WMAPE venta total (%)', 'wmape_con_stock': 'WMAPE con stock (%)', 'mae': 'MAE (u)',
+                'bias': 'Bias (u)', 'productos': 'Productos', 'periodos': 'Períodos',
+                'sku_donde_es_el_mejor': 'SKU donde es el mejor'}
+    metricas_cols = {'wmape': 'WMAPE (%)', 'wmape_total': 'WMAPE venta total (%)',
+                     'wmape_con_stock': 'WMAPE con stock (%)', 'mae': 'MAE (u)', 'rmse': 'RMSE (u)',
+                     'bias': 'Bias (u)', 'mape': 'MAPE (%) — ' + NOTA_MAPE}
+    with pd.ExcelWriter(ruta, engine='openpyxl') as xw:
+        r['resumen'].sort_values('wmape_base_comun').rename(columns=cols_res).round(2).to_excel(
+            xw, sheet_name='Resumen por Modelo', index=False)
+        r['mejor_por_sku'].round(2).to_excel(xw, sheet_name='Mejor Modelo por SKU', index=False)
+        r['metricas_sku'][['sku', 'modelo', 'wmape', 'mae', 'bias', 'periodos', 'suma_real', 'suma_pronostico']
+                          ].round(2).to_excel(xw, sheet_name='Métricas SKU x Modelo', index=False)
+        r['comparacion'].to_excel(xw, sheet_name='WMAPE por SKU y Modelo')
+        _escribir_desagregadas(xw, {'por_segmento': r['por_segmento_modelo'],
+                                    'por_clase_abc': r['por_clase_abc_modelo']}, metricas_cols, True)
+        if len(r['importancias']):
+            r['importancias'].round(4).to_excel(xw, sheet_name='Importancia de variables', index=False)
+        if r['fallidos']:
+            pd.DataFrame(list(r['fallidos'].items()), columns=['Modelo', 'Error']).to_excel(
+                xw, sheet_name='Modelos con error', index=False)
+        pd.DataFrame(NOTAS_COMPARACION, columns=['Concepto', 'Definición']).to_excel(
+            xw, sheet_name='Notas', index=False)
+        for ws in xw.book.worksheets:
+            _formatear(ws, {2: 90} if ws.title == 'Notas' else None)
+    return ruta
+
+
+def exportar_reporte_gestion(r, carpeta):
+    """Excel para el REPORTE DE GESTIÓN: lenguaje de negocio, sin siglas ni nombres técnicos de modelos."""
+    from preve_traducciones import CONFIANZAS, interpretar_confianza, traducir_modelo
+    os.makedirs(carpeta, exist_ok=True)
+    ruta = os.path.join(carpeta, f'reporte_gestion_metodos_{datetime.datetime.now():%Y-%m-%d_%H-%M}.xlsx')
+    mejor = r['mejor_por_sku'].sort_values('venta_real', ascending=False)
+    productos = pd.DataFrame({
+        'Código': mejor['sku'], 'Producto': mejor['nombre'],
+        'Método recomendado': [traducir_modelo(m) for m in mejor['modelo']],
+        'Confiabilidad': mejor['confianza'], 'Precisión estimada': mejor['precision'],
+        'Margen de error estimado (%)': mejor['wmape'].round(0),
+        'Qué significa': [interpretar_confianza(c)[1] for c in mejor['confianza']],
+        'Unidades vendidas en el período evaluado': mejor['venta_real'].round(0),
+    })
+    conteo = mejor['confianza'].value_counts()
+    metodos = mejor['modelo'].value_counts()
+    filas = [('Productos analizados', f'{len(mejor):,}'),
+             ('Métodos de pronóstico comparados', f'{len(r["modelos"])}'),
+             ('Método recomendado para más productos',
+              f'{traducir_modelo(metodos.index[0])} ({metodos.iloc[0]:,} productos)' if len(metodos) else '—')]
+    for c in CONFIANZAS:
+        filas.append((f'Productos con confiabilidad {c.lower()}',
+                      f'{int(conteo.get(c, 0)):,} — {interpretar_confianza(c)[1]}'))
+    filas.append(('Cómo se eligió', 'Para cada producto se simuló cómo habría pronosticado cada método en el '
+                                    'pasado y se eligió el que menos se equivocó frente a las ventas reales.'))
+    with pd.ExcelWriter(ruta, engine='openpyxl') as xw:
+        pd.DataFrame(filas, columns=['Resumen', 'Detalle']).to_excel(xw, sheet_name='Resumen', index=False)
+        productos.to_excel(xw, sheet_name='Productos', index=False)
+        pd.DataFrame({'Método': [traducir_modelo(m) for m in metodos.index],
+                      'Productos donde es el mejor': metodos.values}).to_excel(xw, sheet_name='Métodos', index=False)
+        for ws in xw.book.worksheets:
+            _formatear(ws, {1: 44, 2: 90} if ws.title == 'Resumen' else {2: 44, 3: 44, 5: 46, 7: 70})
+    return ruta
