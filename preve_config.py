@@ -22,6 +22,7 @@ import datetime
 from dataclasses import dataclass, field
 
 from database import Database, slug
+from preve_modelos_baseline import MODELOS_COMPARABLES, VENTANAS_PROMEDIO_MOVIL, validar_modelos, validar_ventanas
 from preve_utils import get_logger
 
 logger = get_logger('config')
@@ -70,17 +71,25 @@ DEFAULTS = {
     # ── Cambios experimentales (comparación de modelos / artículo) ──
     'habilitar_modo_comparacion': (False, 'bool',
                                    'Habilita el modo "Comparar modelos" en la interfaz de backtesting.'),
-    'modelos_activos': (['GBM', 'GBM_sin_disp', 'CatBoost', 'Croston-TSB',
-                         'Naive', 'SMA', 'SES', 'Holt', 'Croston', 'SBA', 'TSB_NegBin'], 'json',
-                        'Lista de modelos habilitados para la comparación (solo afecta al modo comparación).'),
+    'modelos_activos': (list(MODELOS_COMPARABLES), 'json',
+                        'Modelos que evalúa el modo comparación (nombres de preve_modelos_baseline.'
+                        'MODELOS_COMPARABLES). Solo afecta al modo comparación.'),
+    'ventanas_promedio_movil': (list(VENTANAS_PROMEDIO_MOVIL), 'json',
+                                'Ventanas (semanas) del modelo "Promedio móvil" en el modo comparación.'),
     'mostrar_metricas_avanzadas': (False, 'bool',
                                    'Muestra nombres de modelos y métricas numéricas en la interfaz (modo avanzado).'),
     'usar_disponibilidad_gbm': (True, 'bool',
-                                 'Incluir features de disponibilidad (stock) en el modelo GBM. '
-                                 'Desactivar para comparar el modelo con y sin corrección por stock-outs.'),
+                                 'Incluir features de disponibilidad (stock) en el modelo GBM de producción. '
+                                 'Desactivar solo para comparar el modelo con y sin corrección por stock-outs.'),
+    'calcular_importancias_gbm': (False, 'bool',
+                                  'Calcular la importancia de cada variable del GBM en cada análisis (lento; se '
+                                  'exporta a importancia_variables.csv). El modo comparación la calcula siempre.'),
+    'usar_asignacion_modelos': (False, 'bool',
+                                'Producción usa, para cada producto, el modelo elegido en el último modo '
+                                'comparación (si lo hay). Apagado = el modelo de siempre.'),
     'umbral_censura_alerta': (0.4, 'float',
-                               'Fracción de semanas recientes con stock=0 a partir de la cual se marca la '
-                               'recomendación como de menor confianza (0.0–1.0).'),
+                               'Fracción de días de las últimas 13 semanas sin stock a partir de la cual la '
+                               'recomendación se marca como de menor confianza (0.0–1.0).'),
 }
 
 CICLOS_DEFECTO = [
@@ -148,6 +157,12 @@ class ParametrosModelo:
     pedido_atipico_min_unidades: int = 20
     pedido_atipico_factor: float = 10.0
     excluir_atipicos_de_la_demanda: bool = True
+    # Experimentales: los valores por defecto dejan el pipeline exactamente como antes
+    usar_disponibilidad_gbm: bool = True
+    calcular_importancias_gbm: bool = False
+    usar_asignacion_modelos: bool = False
+    umbral_censura_alerta: float = 0.4
+    ventanas_promedio_movil: tuple = VENTANAS_PROMEDIO_MOVIL
 
     @property
     def horizonte_semanas(self):
@@ -255,6 +270,16 @@ class Config:
         if clave in DEFAULTS:
             _, tipo, desc = DEFAULTS[clave]
             valor = validar_tipo(clave, valor, tipo)
+            if clave == 'modelos_activos':
+                validos, desconocidos = validar_modelos(valor)
+                if desconocidos or not validos:
+                    raise ConfigError(f'"modelos_activos": nombres desconocidos {desconocidos or valor}. '
+                                      f'Válidos: {", ".join(MODELOS_COMPARABLES)}')
+            elif clave == 'ventanas_promedio_movil':
+                try:
+                    valor = validar_ventanas(valor)
+                except ValueError as e:
+                    raise ConfigError(f'"ventanas_promedio_movil": {e}') from None
             self.db.set_config(clave, valor, tipo, desc)
         else:
             self.db.set_config(clave, valor)
@@ -423,4 +448,26 @@ class Config:
             pedido_atipico_min_unidades=int(self.get('pedido_atipico_min_unidades')),
             pedido_atipico_factor=float(self.get('pedido_atipico_factor')),
             excluir_atipicos_de_la_demanda=bool(self.get('excluir_atipicos_de_la_demanda')),
+            usar_disponibilidad_gbm=bool(self.get('usar_disponibilidad_gbm')),
+            calcular_importancias_gbm=bool(self.get('calcular_importancias_gbm')),
+            usar_asignacion_modelos=bool(self.get('usar_asignacion_modelos')),
+            umbral_censura_alerta=float(self.get('umbral_censura_alerta')),
+            ventanas_promedio_movil=tuple(self.ventanas_promedio_movil()),
         )
+
+    # ── modo comparación ───────────────────────────────────
+    def modelos_para_comparar(self):
+        """(modelos válidos en orden canónico, nombres desconocidos). Si ninguno es válido, se usan todos."""
+        validos, desconocidos = validar_modelos(self.get('modelos_activos'))
+        if desconocidos:
+            logger.warning('modelos_activos tiene nombres desconocidos (se ignoran): %s. Válidos: %s',
+                           desconocidos, list(MODELOS_COMPARABLES))
+        return (validos or list(MODELOS_COMPARABLES)), desconocidos
+
+    def ventanas_promedio_movil(self):
+        """Ventanas del promedio móvil; si lo guardado es inválido, las por defecto (con aviso en el log)."""
+        try:
+            return validar_ventanas(self.get('ventanas_promedio_movil'))
+        except ValueError as e:
+            logger.warning('ventanas_promedio_movil inválido (%s); se usan %s', e, list(VENTANAS_PROMEDIO_MOVIL))
+            return list(VENTANAS_PROMEDIO_MOVIL)
