@@ -705,40 +705,13 @@ def construir_features_lgb(sub):
 MODELO_GBM = 'GBM global (Poisson)'
 
 
-def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log, params=None, stock=None):
-    """Pronostica el horizonte (p10/p50/p90) de cada SKU.
-
-    Modelo principal: GBM global con pérdida de Poisson (preve_modelo_gbm), que aprende de todos los SKU con
-    historia de ventas y usa la disponibilidad (stock) como señal. Si no hay historia suficiente para entrenarlo
-    (menos de ~13 semanas), todo queda como antes: Croston-TSB para los intermitentes, CatBoost (por categoría y
-    precio) para los productos nuevos o sin ninguna venta, y los 'regulares' quedan sin pronóstico (no se inventa).
-    `stock`: DataFrame fecha × sku (stock al cierre del día), el mismo que recibe construir_panel_y_segmentacion.
-    Actualiza `segmentacion['modelo_asignado']` con el modelo realmente usado.
-    """
-    from catboost import CatBoostRegressor
+def _pronosticar_croston_tsb(skus, panel_full, p):
+    """Croston-TSB por SKU (registros sku/p10/p50/p90). Mismo cálculo que usó siempre el pipeline."""
     from statsforecast.models import TSB
-    from preve_modelo_gbm import pronosticar_gbm
-
-    # FIX: horizonte e hiperparámetros desde la configuración (antes fijos en el código)
-    p = params or ParametrosModelo()
-    hs = p.horizonte_semanas                 # horizonte real en semanas (141 d → 20.14)
-    ht = max(1, int(round(hs)))              # horizonte entero para el target de los modelos
-
+    hs = p.horizonte_semanas
+    ht = max(1, int(round(hs)))
     resultados = []
-
-    # ---------- Modelo global GBM (Poisson): todos los SKU con historia de ventas ----------
-    log('Entrenando el modelo global de demanda (GBM Poisson)...')
-    gbm, gbm_importances = pronosticar_gbm(panel_full, stock, fecha_fin, hs, log)
-    if gbm is not None:
-        resultados.extend(gbm.to_dict('records'))
-        segmentacion.loc[segmentacion.sku.isin(set(gbm.sku)), 'modelo_asignado'] = MODELO_GBM
-
-    panel_full = panel_full.merge(segmentacion[['sku', 'modelo_asignado']], on='sku', how='left')
-
-    # ---------- Croston-TSB (solo cuando no hay GBM) ----------
-    skus_croston = segmentacion[segmentacion.modelo_asignado == 'Croston-TSB']['sku'].tolist()
-    log(f'Entrenando Croston-TSB para {len(skus_croston)} SKU...')
-    for sku in skus_croston:
+    for sku in skus:
         serie = panel_full[panel_full.sku == sku].sort_values('semana_inicio')['unidades_venta_neta'].values.astype(float)
         if len(serie) < 4 or serie.sum() == 0:
             pred, std = 0.0, 0.0
@@ -757,63 +730,174 @@ def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log, params
         p10 = max(0.0, pred - 1.2816 * std) * hs
         p90 = (pred + 1.2816 * std) * hs
         resultados.append({'sku': sku, 'demanda_p10_141d': p10, 'demanda_p50_141d': p50, 'demanda_p90_141d': p90})
+    return resultados
+
+
+def _pronosticar_catboost(skus_cb, panel_full, dim, p, log):
+    """CatBoost por categoría y precio (registros sku/p10/p50/p90). Mismo cálculo que usó siempre el pipeline."""
+    from catboost import CatBoostRegressor
+    hs = p.horizonte_semanas
+    resultados = []
+    if not skus_cb:
+        return resultados
+    dimx = dim.set_index('sku')
+    filas = []
+    for sku in skus_cb:
+        if sku not in dimx.index:
+            continue
+        filas.append({
+            'sku': sku,
+            'categoria': str(dimx.loc[sku, 'categoria']),
+            'subcategoria': str(dimx.loc[sku, 'subcategoria']),
+            'costo': dimx.loc[sku, 'costo_puesto_almacen_pen'],
+            'precio': dimx.loc[sku, 'precio_regular_pen'],
+        })
+    base = pd.DataFrame(filas)
+    ventas_8s = panel_full[panel_full.sku.isin(skus_cb)].sort_values(['sku', 'semana_inicio']).groupby('sku').tail(8)
+    y = ventas_8s.groupby('sku')['unidades_venta_neta'].mean().rename('y')
+    semanas_con_stock = ventas_8s.groupby('sku').size().rename('n_semanas')
+    base = base.merge(y, on='sku', how='left').merge(semanas_con_stock, on='sku', how='left')
+
+    cat_cols = ['categoria', 'subcategoria']
+    for c in cat_cols:
+        base[c] = base[c].fillna('SIN_DATO')
+    num_cols = ['costo', 'precio']
+    feat_cols = cat_cols + num_cols
+    train = base.dropna(subset=num_cols + ['y'])
+    train = train[train['n_semanas'].fillna(0) >= 4]
+    # CatBoost no entrena si todos los objetivos son iguales (p. ej. todos los SKU sin ventas): no hay señal
+    if len(train) > 30 and train['y'].nunique() > 1:
+        model = CatBoostRegressor(**{'verbose': False, **p.catboost_params, 'cat_features': cat_cols})
+        model.fit(train[feat_cols], train['y'])
+        resid_std = float(np.std(model.predict(train[feat_cols]) - train['y']))
+        pred_base = base.dropna(subset=num_cols).copy()
+        pred_base['pred_sem'] = np.clip(model.predict(pred_base[feat_cols]), 0, None)
+        for _, r in pred_base.iterrows():
+            p50 = r['pred_sem'] * hs
+            # Incertidumbre escala con sqrt(semanas) para datos independientes
+            sigma_horizonte = resid_std * hs ** 0.5
+            p10 = max(0, p50 - 1.2816 * sigma_horizonte)
+            p90 = p50 + 1.2816 * sigma_horizonte
+            resultados.append({'sku': r['sku'], 'demanda_p10_141d': p10, 'demanda_p50_141d': p50, 'demanda_p90_141d': p90})
+    else:
+        log('  CatBoost: datos insuficientes para entrenar, se omite (no se inventa pronóstico).')
+    return resultados
+
+
+def entrenar_y_pronosticar(panel_full, segmentacion, dim, fecha_fin, log, params=None, stock=None,
+                           devolver_extras=False, sucursal=None, asignacion=None):
+    """Pronostica el horizonte (p10/p50/p90) de cada SKU. Devuelve (pronostico, sin_pronostico).
+
+    Modelo principal: GBM global con pérdida de Poisson (preve_modelo_gbm), que aprende de todos los SKU con
+    historia de ventas y usa la disponibilidad (stock) como señal. Si no hay historia suficiente para entrenarlo
+    (menos de ~13 semanas), todo queda como antes: Croston-TSB para los intermitentes, CatBoost (por categoría y
+    precio) para los productos nuevos o sin ninguna venta, y los 'regulares' quedan sin pronóstico (no se inventa).
+    `stock`: DataFrame fecha × sku (stock al cierre del día), el mismo que recibe construir_panel_y_segmentacion.
+    Actualiza `segmentacion['modelo_asignado']` con el modelo realmente usado.
+
+    Opcionales (apagados por defecto; sin ellos la salida es la de siempre):
+      params.usar_disponibilidad_gbm=False   GBM sin las variables de stock.
+      params.calcular_importancias_gbm=True  importancia de variables del GBM (lento) en extras['importancias'].
+      params.usar_asignacion_modelos=True    usa el modelo elegido por SKU en el modo comparación: `asignacion`
+          ({sku: modelo}) o, si no se pasa, la guardada en la base para `sucursal`. Los SKU sin asignación, o
+          asignados al pipeline, siguen con el modelo normal.
+      devolver_extras=True                    devuelve (pronostico, sin_pronostico, extras) con extras =
+          {'importancias': DataFrame o None, 'features_gbm': [...], 'asignacion_aplicada': {sku: modelo}}.
+    """
+    from preve_modelo_gbm import pronosticar_gbm
+
+    # FIX: horizonte e hiperparámetros desde la configuración (antes fijos en el código)
+    p = params or ParametrosModelo()
+    hs = p.horizonte_semanas                 # horizonte real en semanas (141 d → 20.14)
+    panel_original = panel_full
+
+    resultados = []
+
+    # ---------- Modelo global GBM (Poisson): todos los SKU con historia de ventas ----------
+    log('Entrenando el modelo global de demanda (GBM Poisson)...')
+    gbm, extras_gbm = pronosticar_gbm(panel_full, stock, fecha_fin, hs, log,
+                                      usar_disponibilidad=p.usar_disponibilidad_gbm,
+                                      calcular_importancias=p.calcular_importancias_gbm, devolver_extras=True)
+    if gbm is not None:
+        resultados.extend(gbm.to_dict('records'))
+        segmentacion.loc[segmentacion.sku.isin(set(gbm.sku)), 'modelo_asignado'] = MODELO_GBM
+
+    panel_full = panel_full.merge(segmentacion[['sku', 'modelo_asignado']], on='sku', how='left')
+
+    # ---------- Croston-TSB (solo cuando no hay GBM) ----------
+    skus_croston = segmentacion[segmentacion.modelo_asignado == 'Croston-TSB']['sku'].tolist()
+    log(f'Entrenando Croston-TSB para {len(skus_croston)} SKU...')
+    resultados.extend(_pronosticar_croston_tsb(skus_croston, panel_full, p))
 
     # ---------- CatBoost (productos sin ninguna venta: se estima por categoría y precio) ----------
     skus_cb = segmentacion[segmentacion.modelo_asignado == 'CatBoost']['sku'].tolist()
     log(f'Entrenando CatBoost para {len(skus_cb)} SKU...')
-    if skus_cb:
-        dimx = dim.set_index('sku')
-        filas = []
-        for sku in skus_cb:
-            if sku not in dimx.index:
-                continue
-            filas.append({
-                'sku': sku,
-                'categoria': str(dimx.loc[sku, 'categoria']),
-                'subcategoria': str(dimx.loc[sku, 'subcategoria']),
-                'costo': dimx.loc[sku, 'costo_puesto_almacen_pen'],
-                'precio': dimx.loc[sku, 'precio_regular_pen'],
-            })
-        base = pd.DataFrame(filas)
-        ventas_8s = panel_full[panel_full.sku.isin(skus_cb)].sort_values(['sku', 'semana_inicio']).groupby('sku').tail(8)
-        y = ventas_8s.groupby('sku')['unidades_venta_neta'].mean().rename('y')
-        semanas_con_stock = ventas_8s.groupby('sku').size().rename('n_semanas')
-        base = base.merge(y, on='sku', how='left').merge(semanas_con_stock, on='sku', how='left')
-
-        cat_cols = ['categoria', 'subcategoria']
-        for c in cat_cols:
-            base[c] = base[c].fillna('SIN_DATO')
-        num_cols = ['costo', 'precio']
-        feat_cols = cat_cols + num_cols
-        train = base.dropna(subset=num_cols + ['y'])
-        train = train[train['n_semanas'].fillna(0) >= 4]
-        # CatBoost no entrena si todos los objetivos son iguales (p. ej. todos los SKU sin ventas): no hay señal
-        if len(train) > 30 and train['y'].nunique() > 1:
-            model = CatBoostRegressor(**{'verbose': False, **p.catboost_params, 'cat_features': cat_cols})
-            model.fit(train[feat_cols], train['y'])
-            resid_std = float(np.std(model.predict(train[feat_cols]) - train['y']))
-            pred_base = base.dropna(subset=num_cols).copy()
-            pred_base['pred_sem'] = np.clip(model.predict(pred_base[feat_cols]), 0, None)
-            for _, r in pred_base.iterrows():
-                p50 = r['pred_sem'] * hs
-                # Incertidumbre escala con sqrt(semanas) para datos independientes
-                sigma_horizonte = resid_std * hs ** 0.5
-                p10 = max(0, p50 - 1.2816 * sigma_horizonte)
-                p90 = p50 + 1.2816 * sigma_horizonte
-                resultados.append({'sku': r['sku'], 'demanda_p10_141d': p10, 'demanda_p50_141d': p50, 'demanda_p90_141d': p90})
-        else:
-            log('  CatBoost: datos insuficientes para entrenar, se omite (no se inventa pronóstico).')
+    resultados.extend(_pronosticar_catboost(skus_cb, panel_full, dim, p, log))
 
     _PRON_COLS = ['sku', 'demanda_p10_141d', 'demanda_p50_141d', 'demanda_p90_141d']
     pronostico = pd.DataFrame(resultados or [], columns=_PRON_COLS).drop_duplicates(subset='sku')
     # una lista vacía o mezclada deja las columnas en object y calcular_recomendacion falla en .round()
     pronostico[_PRON_COLS[1:]] = pronostico[_PRON_COLS[1:]].astype(float)
+
+    aplicada = {}
+    if p.usar_asignacion_modelos:
+        if asignacion is None and sucursal:
+            from database import Database
+            asignacion = Database.default().mapa_asignacion_modelos(sucursal)
+        pronostico, aplicada = _aplicar_asignacion(pronostico, segmentacion, asignacion or {}, panel_original,
+                                                   dim, stock, fecha_fin, p, log, gbm)
+
     sin_pronostico = segmentacion[~segmentacion.sku.isin(pronostico.sku)]
     log(f'Pronóstico generado para {len(pronostico)} SKU. Sin pronóstico posible: {len(sin_pronostico)}')
-    extras = {}
-    if gbm_importances:
-        extras['feature_importances'] = gbm_importances
-    return pronostico, sin_pronostico, extras
+    if not devolver_extras:
+        return pronostico, sin_pronostico
+    return pronostico, sin_pronostico, {'importancias': extras_gbm.get('importancias'),
+                                        'features_gbm': extras_gbm.get('features', []),
+                                        'asignacion_aplicada': aplicada}
+
+
+def _aplicar_asignacion(pronostico, segmentacion, asignacion, panel, dim, stock, fecha_fin, p, log, gbm_prod):
+    """Reemplaza el pronóstico de cada SKU asignado a otro modelo (modo comparación) por el de ese modelo.
+
+    Devuelve (pronostico, {sku: modelo aplicado}). Nombres desconocidos se ignoran con aviso; si el modelo
+    asignado no puede pronosticar un SKU, ese SKU conserva el pronóstico normal.
+    """
+    import preve_modelos_baseline as mb
+    presentes = set(segmentacion['sku'])
+    por_modelo, desconocidos = {}, set()
+    for sku, modelo in asignacion.items():
+        if sku not in presentes or modelo == mb.MODELO_PRODUCCION:
+            continue
+        if not mb.es_modelo_concreto(modelo):
+            desconocidos.add(modelo)
+            continue
+        por_modelo.setdefault(modelo, []).append(sku)
+    if desconocidos:
+        log(f'⚠ Asignación de modelos: se ignoran nombres desconocidos: {", ".join(sorted(desconocidos))}')
+    if not por_modelo:
+        log('Asignación de modelos activa, pero ningún SKU está asignado a otro modelo: pronóstico normal.')
+        return pronostico, {}
+    nuevos, aplicada = [], {}
+    for modelo, skus in por_modelo.items():
+        if modelo == mb.MODELO_GBM and p.usar_disponibilidad_gbm and gbm_prod is not None:
+            pron_m = gbm_prod[gbm_prod['sku'].isin(skus)]          # ya calculado: es el mismo modelo
+        else:
+            pron_m = mb.pronosticar_desde_panel(modelo, panel, segmentacion, dim, stock, fecha_fin, p, log,
+                                                skus=skus)
+        nuevos.append(pron_m[['sku', 'demanda_p10_141d', 'demanda_p50_141d', 'demanda_p90_141d']])
+        aplicada.update({s: modelo for s in pron_m['sku']})
+    if not aplicada:
+        log('Asignación de modelos: los modelos asignados no pudieron pronosticar; pronóstico normal.')
+        return pronostico, {}
+    reemplazo = pd.concat(nuevos, ignore_index=True)
+    pronostico = pd.concat([pronostico[~pronostico['sku'].isin(set(reemplazo['sku']))], reemplazo],
+                           ignore_index=True)
+    serie = pd.Series(aplicada)
+    mascara = segmentacion['sku'].isin(serie.index)
+    segmentacion.loc[mascara, 'modelo_asignado'] = segmentacion.loc[mascara, 'sku'].map(serie)
+    log(f'Asignación de modelos aplicada a {len(aplicada):,} SKU '
+        f'({", ".join(f"{m}: {n}" for m, n in serie.value_counts().items())}).')
+    return pronostico, aplicada
 
 
 # ---------------------------------------------------------------------------
@@ -935,6 +1019,37 @@ def cargar_ordenes_abiertas(carpeta):
     return df.groupby('sku')['cantidad'].sum()
 
 
+DIAS_VENTANA_CENSURA = 91          # 13 semanas
+
+
+def nota_confianza_censura(frac):
+    """Texto de negocio para un producto que pasó una fracción `frac` de días recientes sin stock."""
+    return (f'Recomendación menos confiable: el producto estuvo agotado {frac:.0%} de los días de las últimas '
+            f'13 semanas, así que sus ventas pueden estar por debajo de la demanda real. Revísala antes de comprar.')
+
+
+def marcar_alerta_censura(df, stock, umbral=0.4, dias=DIAS_VENTANA_CENSURA):
+    """Copia de `df` con frac_dias_sin_stock_13sem, alerta_censura y nota_confianza por SKU.
+
+    frac = días con stock <= 0 / días observados en los últimos `dias` días del stock. Solo cuentan los días desde
+    que el producto tuvo stock por primera vez (antes no existía: no es un quiebre). Sin stock: sin alerta.
+    """
+    df = df.copy()
+    frac = pd.Series(dtype=float)
+    if stock is not None and len(stock):
+        existe = (stock > 0).cummax()
+        ventana = stock.index > stock.index.max() - pd.Timedelta(days=dias)
+        exist_v = existe[ventana]
+        dias_obs = exist_v.sum()
+        sin_stock = ((stock[ventana] <= 0) & exist_v).sum()
+        frac = (sin_stock / dias_obs.where(dias_obs > 0)).fillna(0.0)
+    df['frac_dias_sin_stock_13sem'] = df['sku'].map(frac).fillna(0.0).astype(float)
+    df['alerta_censura'] = df['frac_dias_sin_stock_13sem'] >= umbral
+    df['nota_confianza'] = [nota_confianza_censura(f) if a else ''
+                            for f, a in zip(df['frac_dias_sin_stock_13sem'], df['alerta_censura'])]
+    return df
+
+
 def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fecha_fin, log,
                            compras_raw=None, mapa_bc_a_sku=None,
                            horizonte_semanas_override=None, stock_en_transito=None,
@@ -1038,36 +1153,9 @@ def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fec
     # días desde la última semana con venta; NaN si nunca vendió (sin evidencia, no se descontinúa)
     df['dias_sin_venta'] = df['sku'].map((pd.Timestamp(fecha_fin) - ultima).dt.days.clip(lower=0))
 
-    # --- Indicador de confianza por censura (stock-outs recientes) ---
-    # Semanas recientes (últimas 13) con stock=0 indican demanda posiblemente censurada
-    try:
-        from preve_config import Config
-        umbral_censura = Config.actual().get('umbral_censura_alerta')
-    except Exception:
-        umbral_censura = 0.4
-    sem_recientes_13 = panel_full[panel_full['semana_inicio'] > (fecha_fin - pd.Timedelta(weeks=13))]
-    if stock is not None and len(stock):
-        stock_sem = {}
-        for sem in sem_recientes_13['semana_inicio'].unique():
-            sem_ts = pd.Timestamp(sem)
-            dia_inicio = sem_ts - pd.Timedelta(days=1)
-            cercano = stock.index[stock.index <= dia_inicio]
-            if len(cercano):
-                stock_sem[sem] = (stock.loc[cercano[-1]] > 0).astype(int)
-        if stock_sem:
-            stock_13 = pd.DataFrame(stock_sem).T
-            frac_sin_stock = 1.0 - stock_13.mean()
-            df['frac_sin_stock_13sem'] = df['sku'].map(frac_sin_stock).fillna(0.0)
-        else:
-            df['frac_sin_stock_13sem'] = 0.0
-    else:
-        df['frac_sin_stock_13sem'] = 0.0
-    df['alerta_censura'] = df['frac_sin_stock_13sem'] >= umbral_censura
-    df['nota_confianza'] = np.where(
-        df['alerta_censura'],
-        'Esta recomendación tiene menor confianza porque el producto estuvo frecuentemente agotado; '
-        'el sistema corrigió la demanda estimada, pero verifica manualmente si es posible.',
-        '')
+    # --- Indicador de confianza por censura (quiebres de stock recientes) ---
+    # Solo agrega columnas informativas: no cambia la acción ni la cantidad sugerida.
+    df = marcar_alerta_censura(df, stock, p.umbral_censura_alerta)
 
     # --- Clasificar acción ---
     if plantilla is not None:
