@@ -301,7 +301,24 @@ perfiles_importacion = Table(
     Column('creado_en', DateTime, default=_ahora),
 )
 
-_TABLAS_001 = [t for n, t in metadata.tables.items() if n != 'perfiles_importacion']
+# Modelo elegido por SKU y sucursal en el modo comparación (preve_backtesting.comparar_modelos). Tabla propia:
+# productos.modelo_asignado la reescribe cada análisis normal con el modelo que usó el pipeline.
+asignacion_modelos = Table(
+    'asignacion_modelos', metadata,
+    Column('id', Integer, primary_key=True),
+    Column('sucursal_id', Integer, ForeignKey('sucursales.id'), nullable=False),
+    Column('sku', String(100), nullable=False),
+    Column('modelo', String(60), nullable=False),      # nombre canónico (preve_modelos_baseline)
+    Column('wmape', Float),
+    Column('mae', Float),
+    Column('bias', Float),
+    Column('periodos', Integer),
+    Column('confianza', String(20)),
+    Column('actualizado_en', DateTime, default=_ahora),
+    UniqueConstraint('sucursal_id', 'sku'),
+)
+
+_TABLAS_001 = [t for n, t in metadata.tables.items() if n not in ('perfiles_importacion', 'asignacion_modelos')]
 
 
 def _migracion_001(conn):
@@ -314,10 +331,16 @@ def _migracion_002(conn):
     metadata.create_all(conn, tables=[perfiles_importacion])
 
 
+def _migracion_003(conn):
+    """Modo comparación: modelo asignado por SKU (solo agrega una tabla)."""
+    metadata.create_all(conn, tables=[asignacion_modelos])
+
+
 # (versión, descripción, función). Agregar migraciones nuevas al final, nunca editar las anteriores.
 MIGRACIONES = [
     (1, 'Esquema inicial', _migracion_001),
     (2, 'Perfiles de importación', _migracion_002),
+    (3, 'Asignación de modelos por SKU', _migracion_003),
 ]
 
 
@@ -811,6 +834,41 @@ class Database:
     def listar_ejecuciones_backtesting(self):
         """Corridas de backtesting, la más reciente primero."""
         return self._df(select(ejecuciones_backtesting).order_by(ejecuciones_backtesting.c.id.desc()))
+
+    # ── asignación de modelos por SKU (modo comparación) ───
+    def guardar_asignacion_modelos(self, sucursal, df):
+        """Upsert por (sucursal, sku). df: sku, modelo y opcionales wmape, mae, bias, periodos, confianza.
+        Devuelve la cantidad de filas guardadas."""
+        if df is None or df.empty:
+            return 0
+        sid = self.obtener_o_crear_sucursal(sucursal)
+        ahora = _ahora()
+        filas = [{'sucursal_id': sid, 'sku': str(r['sku']), 'modelo': str(r['modelo']),
+                  'wmape': _num(r.get('wmape')), 'mae': _num(r.get('mae')), 'bias': _num(r.get('bias')),
+                  'periodos': _entero(r.get('periodos')), 'confianza': _texto(r.get('confianza')),
+                  'actualizado_en': ahora} for r in df.to_dict('records')]
+        with self.engine.begin() as conn:
+            self._upsert(conn, asignacion_modelos, filas, ['sucursal_id', 'sku'],
+                         ['modelo', 'wmape', 'mae', 'bias', 'periodos', 'confianza', 'actualizado_en'])
+        return len(filas)
+
+    def obtener_asignacion_modelos(self, sucursal):
+        """DataFrame sku, modelo, wmape, mae, bias, periodos, confianza, actualizado_en de la sucursal."""
+        sid = self.obtener_o_crear_sucursal(sucursal)
+        t = asignacion_modelos
+        return self._df(select(t.c.sku, t.c.modelo, t.c.wmape, t.c.mae, t.c.bias, t.c.periodos, t.c.confianza,
+                               t.c.actualizado_en).where(t.c.sucursal_id == sid).order_by(t.c.sku))
+
+    def mapa_asignacion_modelos(self, sucursal):
+        """{sku: modelo} asignado en el modo comparación para la sucursal (vacío si nunca se comparó)."""
+        df = self.obtener_asignacion_modelos(sucursal)
+        return dict(zip(df['sku'], df['modelo'])) if len(df) else {}
+
+    def borrar_asignacion_modelos(self, sucursal):
+        """Elimina la asignación de la sucursal (vuelve todo al modelo normal). Devuelve las filas borradas."""
+        sid = self.obtener_o_crear_sucursal(sucursal)
+        with self.engine.begin() as conn:
+            return conn.execute(delete(asignacion_modelos).where(asignacion_modelos.c.sucursal_id == sid)).rowcount
 
     # ── plantillas y categorías ────────────────────────────
     def guardar_plantilla_categorias(self, nombre, reglas, descripcion='', es_plantilla_sistema=False):
