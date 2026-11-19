@@ -1118,7 +1118,7 @@ class VistaConfig(Vista):
     def _card_erp(self):
         """Fase 4: elegir la integración con ERP (o ninguna = solo importación manual)."""
         from tkinter import ttk
-        from plugins import listar_plugins
+        from plugins import listar_plugins, obtener_plugin
         cfg = dt.Config.actual()
         plugins = listar_plugins()
         card = Card(self.cont, padx=22, pady=18)
@@ -1143,7 +1143,9 @@ class VistaConfig(Vista):
             label(card.body, plugins[actual].descripcion, 9, color=TEXT_MUTED, wraplength=S(700),
                   justify='left').pack(anchor='w', pady=(S(6), 0))
         if actual == 'negosy' and actual in plugins:
-            self._negosy_ajustes(card.body, plugins[actual])
+            # FIX: listar_plugins() devuelve la CLASE del plugin; _negosy_ajustes necesita una
+            # instancia (llama a métodos de instancia como credenciales_en_ambos_lados()).
+            self._negosy_ajustes(card.body, obtener_plugin(actual))
 
     def _negosy_ajustes(self, cuerpo, plugin):
         """Fase 10: URLs, credenciales y catálogo de Negosy, editables (antes fijos en el código / en .env)."""

@@ -134,7 +134,8 @@ def test_resultados_quedan_en_la_base_y_en_el_excel(backtester):
     assert any(h.startswith('Período 1 (') for h in hojas)
     assert 'Simulación Compras' in hojas and 'Ventanas omitidas' in hojas
     periodo = pd.read_excel(res['ruta_excel'], sheet_name=[h for h in hojas if h.startswith('Período 1')][0])
-    assert list(periodo.columns) == ['Código', 'Nombre', 'Modelo', 'Clasif', 'Pronóstico', 'Real', 'Error Abs',
+    assert list(periodo.columns) == ['Código', 'Nombre', 'Modelo', 'Clasif', 'Pronóstico', 'Real (demanda evaluada)',
+                                     'Real total', 'Pedido atípico', 'Con stock al inicio', 'Error Abs',
                                      'Error %', 'Bias']
 
 

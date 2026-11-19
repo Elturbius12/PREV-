@@ -2,6 +2,57 @@
 
 Todos los cambios relevantes de PREVÉ, organizados por fase.
 
+## [Calidad de datos] — 2026-11-06 · Correcciones que inflaban el error del pronóstico
+
+Backtesting San José, ventanas de 14 días desde 2025-09-29 (28 ventanas, 3.821 productos). Todos los WMAPE se midieron con el mismo rango y el mismo código de métricas.
+
+| Paso | WMAPE (venta total) | WMAPE (demanda al detalle) | WMAPE (productos con stock) | Decisión |
+|---|---|---|---|---|
+| Línea base (63 %), reproducida con el punto 1 aplicado | 63,07 % | — | — | — |
+| 2) Disponibilidad robusta | 62,99 % | — | — | se mantiene |
+| 3) Pedidos atípicos fuera de la demanda | **57,94 %** | **53,54 %** | 51,44 % | se mantiene |
+
+El «WMAPE (demanda al detalle)» usa como real la venta sin pedidos atípicos y el «WMAPE (venta total)» la venta completa: son indicadores distintos, no se sustituyen entre sí. Ningún punto empeoró, así que no se revirtió nada.
+
+### Corregido
+- **1) Fecha del listado no detectada** (`fecha_desde_nombre`): `listado_productos_20603376162_20261106.xlsx` devolvía `None` porque `re.search` hallaba antes «206033…» (parte del RUC). Ahora YYYYMMDD exige 8 dígitos que no sean parte de un número más largo (`(?<!\d)…(?!\d)`) y se recorren todas las coincidencias hasta la primera fecha válida. El stock se ancla a la fecha del listado (2026-11-06) y no a la última transacción.
+- **2) Disponibilidad robusta** (`_matrices`, `preve_modelo_gbm.py`): el stock reconstruido se recorta a ≥ 0 (había 163 SKU con stock negativo) y toda semana con ventas y disponibilidad 0 pasa a 1/7 (una venta prueba que había stock; 716 SKU, 9.135 u vendidas con stock reconstruido ≤ 0).
+- **CatBoost no entrenaba cuando todos los objetivos eran iguales** (`All train targets are equal`, p. ej. todos los SKU sin ventas): el backtesting se caía en la primera ventana. Ahora, sin variación en el objetivo, se omite igual que con datos insuficientes (se registra en el log). No cambia ningún pronóstico que antes se generaba.
+
+### Cambiado
+- **3) Pedidos atípicos (mayoristas) separados de la demanda al detalle.** Una línea de venta es atípica si `cantidad ≥ pedido_atipico_min_unidades` (20) y `cantidad ≥ pedido_atipico_factor` (10) × la mediana de cantidad por línea de ese SKU. En San José: ~1.390 líneas, 65.700 u (17,2 % de lo vendido).
+  - Nuevos parámetros en Configuración (`preve_config.DEFAULTS` y `ParametrosModelo`): `pedido_atipico_min_unidades`, `pedido_atipico_factor`, `excluir_atipicos_de_la_demanda` (True).
+  - `reconstruir_stock`: `ventas_diarias` trae `mov_atipico` (unidades atípicas del día, negativas como `mov`). `mov` sigue siendo el total y **el stock se calcula igual que antes**. Se loguean líneas y unidades marcadas; el detalle por línea sale en `ventas_diarias.attrs['pedidos_atipicos']` como lista de registros que el llamador debe sacar con `attrs.pop` (un DataFrame ahí rompe `pd.concat`, y pandas copia los `attrs` en cada operación: dejarlos puestos multiplicó por ~10 el tiempo del backtesting).
+  - `construir_panel_y_segmentacion`: con la opción activa la demanda es `-(mov - mov_atipico)`; sin la columna (datos antiguos) o con la opción en False, todo igual que antes.
+  - Backtesting: `_ventas_reales` devuelve la venta sin atípicos con la opción activa. Cada período lleva `real` (evaluada), `real_total`, `atipico` y `con_stock`.
+  - El análisis escribe `pedidos_atipicos.csv` (últimos 90 días: fecha, producto, cliente, unidades) en la carpeta del período y el informe de compras los lista aparte («se compran contra pedido»: no se pronostican).
+- **4) Presentación de métricas.** WMAPE es el indicador principal: primero en el log, en «Resumen General» del Excel y en la vista de backtesting; MAPE va al final con la nota «poco confiable con demanda intermitente (muchas ventas reales en 0)». No cambió el cálculo de ninguna métrica. Se reportan tres WMAPE etiquetados: «WMAPE (demanda al detalle)», «WMAPE (venta total)» y «WMAPE (productos con stock)» (stock > 0 al inicio de la ventana; las demás filas no se eliminan). Las hojas de cada período agregan las columnas «Real total», «Pedido atípico» y «Con stock al inicio».
+
+### Añadido
+- **5) `scripts/diagnostico_stock.py`** (solo lectura): lista los 15 SKU con más unidades vendidas en días de stock inicial ≤ 0, con sus compras, entradas, salidas y traslados. Con los datos actuales: el 2,4 % de las unidades vendidas (9.135 u, 716 SKU). Patrones: (a) lotes comprados y vendidos **el mismo día** (p. ej. 2.000 pañitos comprados y vendidos el 2026-06-04): el stock «al inicio del día» aún no incluye la compra; (b) sillas con ingresos solo como «Entrada» de almacén y sin compra registrada; (c) gaseosas y shampoo con stock negativo prolongado (salidas/traslados sin la entrada correspondiente). Solo se reporta; la lógica no cambió.
+
+### Tests
+- `tests/test_mejoras_datos.py` (fecha del listado, atípicos en stock/panel/backtesting, tres WMAPE etiquetados, CSV de atípicos) y dos tests nuevos en `tests/test_modelo_gbm.py` (stock negativo y disponibilidad ≥ 1/7). `tests/test_fase6.py` actualizado con las columnas nuevas de la hoja de período. 238 tests en verde.
+
+## [Pronóstico] — 2026-11-06 · Modelo global de demanda (error ~40 % menor)
+
+### Cambiado
+- **Nuevo modelo principal: GBM global con pérdida de Poisson** (`preve_modelo_gbm.py`). Un solo modelo aprende de todos los SKU con ventas, con ventas recientes (1–52 semanas), frecuencia de venta, antigüedad, tendencia y **disponibilidad** (stock actual y fracción de días con stock). Reemplaza a LightGBM por grupo y, para productos con ventas, a Croston-TSB y CatBoost. Usa scikit-learn (`HistGradientBoostingRegressor`), que ya es dependencia del proyecto.
+- `entrenar_y_pronosticar` recibe `stock=` (los dos llamadores —orquestador y backtesting— ya lo pasan) y actualiza `segmentacion['modelo_asignado']` con el modelo realmente usado (`GBM global (Poisson)`). Croston-TSB / CatBoost se conservan como antes cuando no hay ≥13 semanas de historia, y CatBoost sigue para productos sin ninguna venta.
+- Se descarta la última semana si está incompleta (datos que no llegan al domingo): una semana a medias hacía parecer que las ventas recientes habían caído.
+- `pd.DataFrame(resultados)` vacío ya no rompe el backtesting (columnas fijas) en las primeras ventanas.
+
+### Validación (walk-forward con las ventas reales de San José, abril 2025 – noviembre 2026)
+| Horizonte | Croston-TSB actual | Promedio 4 semanas | Modelo nuevo |
+|---|---|---|---|
+| 14 días (todas las evaluaciones) | WMAPE 104 % | 95 % | **63 %** |
+| 14 días (solo SKU con stock al inicio) | — | 82 % | **61 %** |
+| 140 días (todas) | 124 % | 179 % | **61 %** |
+Sesgo del modelo nuevo: −2 % a +2 %. Quitar las features de disponibilidad sube el error a 76 %.
+
+### Tests
+- `tests/test_modelo_gbm.py`.
+
 ## [Fase 10] — 2026-11-06 · Negosy configurable y descargas incrementales
 
 ### Cambiado

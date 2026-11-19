@@ -268,6 +268,20 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None, 
                         f'{_pct(r["inv"], inv_total):.0f}%' if inv_total else '—'] for i, r in cat.iterrows()],
                       ['l', 'r', 'r', 'r', 'r'], [5.5, 2.4, 2.4, 3.0, 2.2]))
 
+    # ── Pedidos atípicos (mayoristas): no se pronostican, se compran contra pedido ──
+    atip = _leer_pedidos_atipicos(d.carpeta_periodo)
+    if atip is not None and len(atip):
+        B.append(('h2', f'Pedidos atípicos de los últimos {DIAS_ATIPICOS} días (se compran contra pedido)'))
+        B.append(('p', 'Son ventas muy grandes frente a lo normal del producto (mayoristas, instituciones). Restan '
+                       'stock pero no se pronostican como demanda repetible: si se repiten, se compran contra pedido '
+                       f'y no con el pronóstico. En total: {int(atip["unidades"].sum()):,} unidades en '
+                       f'{len(atip):,} pedidos. Se muestran los 15 más grandes.'))
+        top = atip.nlargest(15, 'unidades')
+        B.append(('table', ['Fecha', 'Producto', 'Cliente', 'Unidades'],
+                  [[pd.Timestamp(r['fecha']).strftime('%d/%m/%Y'), _corto(r['producto'], 40),
+                    _corto(r['cliente'], 26), f'{int(r["unidades"]):,}'] for _, r in top.iterrows()],
+                  ['l', 'l', 'l', 'r'], [2.4, 7.2, 4.6, 2.0]))
+
     # ── Urgentes ──
     B.append(('h1', '2. Productos urgentes'))
     if len(urg):
@@ -370,8 +384,10 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None, 
     B.append(('h1', 'Anexo. Cómo se calculan las cifras'))
     B.append(('bullets', [
         f'Horizonte de planificación: {dt.HORIZONTE_DIAS} días ({dt.duracion_ciclo()} de intervalo de revisión + {dt.LEAD} de entrega).',
-        'Pronóstico: cada producto se asigna a LightGBM, CatBoost o Croston-TSB según su patrón de ventas '
-        '(ADI/CV², umbrales de Syntetos-Boylan).',
+        'Pronóstico: un modelo global de gradient boosting con pérdida de Poisson aprende de todos los productos con '
+        'ventas (ventas recientes, frecuencia, antigüedad y disponibilidad de stock). Croston-TSB y CatBoost solo '
+        'se usan en los casos sin historia suficiente. Los grupos ADI/CV² (Syntetos-Boylan) se mantienen para '
+        'clasificar.',
         'Nivel objetivo = demanda esperada del horizonte + stock de seguridad (niveles de servicio por clase ABC). '
         'Punto de reorden = demanda durante el tiempo de entrega + su stock de seguridad. '
         'Cantidad a comprar = nivel objetivo − stock actual − stock en tránsito.',
@@ -380,6 +396,24 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None, 
         'reconstruido por PREVÉ a partir de ventas, compras y movimientos.',
     ]))
     return meta, B
+
+
+DIAS_ATIPICOS = 90
+NOMBRE_ATIPICOS_CSV = 'pedidos_atipicos.csv'
+
+
+def _leer_pedidos_atipicos(carpeta_periodo):
+    """DataFrame fecha/producto/cliente/unidades de los pedidos atípicos de los últimos 90 días, o None."""
+    ruta = os.path.join(carpeta_periodo or '', NOMBRE_ATIPICOS_CSV)
+    if not carpeta_periodo or not os.path.exists(ruta):
+        return None
+    try:
+        df = pd.read_csv(ruta, parse_dates=['fecha'])
+    except (OSError, ValueError, pd.errors.ParserError, pd.errors.EmptyDataError):
+        logger.warning('No se pudo leer %s', ruta, exc_info=True)
+        return None
+    df['cliente'] = df['cliente'].fillna('')
+    return df
 
 
 def _corto(txt, n):
