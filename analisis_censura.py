@@ -205,6 +205,78 @@ def analizar_censura(panel_full, stock, segmentacion=None, umbral_disponibilidad
     }
 
 
+# ══════════════════════════════════════════════════════════════════
+# Índice de Ceguera por Desabastecimiento (ICD) — ver ICD_metodo.md
+# ══════════════════════════════════════════════════════════════════
+#   ICD = semanas censuradas / semanas sin venta
+#   semana censurada = semana sin venta (venta = 0) en la que el producto NO tuvo stock disponible.
+# ICD = 0: todos los ceros de venta fueron "no hubo demanda". ICD = 1: ningún cero de venta es confiable
+# (todos coinciden con falta de stock). Para un grupo (categoría, segmento, empresa) se agrega sumando
+# numerador y denominador (ICD agregado ponderado), no promediando los ICD de cada SKU.
+COLUMNAS_ICD = ['semanas_sin_venta', 'semanas_censuradas', 'icd', 'skus', 'skus_con_icd',
+                'icd_sku_media', 'icd_sku_mediana', 'icd_sku_p25', 'icd_sku_p75']
+
+
+def icd_serie(ventas, sin_stock):
+    """ICD de UNA serie (arrays alineados por semana). Implementación de referencia, sin dependencias de PREVÉ.
+
+    ventas: unidades vendidas por semana. sin_stock: True si la semana no tuvo stock disponible.
+    Devuelve (semanas_censuradas, semanas_sin_venta, icd); icd = NaN si no hubo semanas sin venta.
+    """
+    v = np.asarray(ventas, dtype=float)
+    s = np.asarray(sin_stock, dtype=bool)
+    sin_venta = v <= 0
+    cens = int((sin_venta & s).sum())
+    n0 = int(sin_venta.sum())
+    return cens, n0, (cens / n0 if n0 else np.nan)
+
+
+def _icd_grupo(g):
+    n0, c = int(g['semanas_sin_venta'].sum()), int(g['semanas_censuradas'].sum())
+    x = g['icd'].dropna()
+    return {'semanas_sin_venta': n0, 'semanas_censuradas': c, 'icd': (c / n0 if n0 else np.nan),
+            'skus': int(len(g)), 'skus_con_icd': int(len(x)),
+            'icd_sku_media': float(x.mean()) if len(x) else np.nan,
+            'icd_sku_mediana': float(x.median()) if len(x) else np.nan,
+            'icd_sku_p25': float(x.quantile(.25)) if len(x) else np.nan,
+            'icd_sku_p75': float(x.quantile(.75)) if len(x) else np.nan}
+
+
+def indice_ceguera(por_sku, sucursal=None):
+    """ICD por SKU, por clase ABC, por segmento ADI/CV² (original, con censura) y a nivel empresa.
+
+    por_sku: la tabla 'por_sku' de analizar_censura (o varias concatenadas con columna 'sucursal').
+    Devuelve dict de DataFrames: por_sku, por_clase_abc, por_segmento, por_sucursal, empresa, distribucion.
+    """
+    d = por_sku.copy()
+    if sucursal is not None:
+        d['sucursal'] = sucursal
+    if 'sucursal' not in d.columns:
+        d['sucursal'] = SIN_SUCURSAL
+    d['icd'] = d['semanas_censuradas'] / d['semanas_sin_venta'].where(d['semanas_sin_venta'] > 0)
+
+    def por(col):
+        filas = [dict({col: k}, **_icd_grupo(g)) for k, g in d.groupby(col, dropna=False)]
+        return pd.DataFrame(filas, columns=[col] + COLUMNAS_ICD)
+
+    bins = [0, .1, .2, .3, .4, .5, .6, .7, .8, .9, 1.0000001]
+    etiquetas = [f'{a:.1f}–{min(b, 1):.1f}' for a, b in zip(bins[:-1], bins[1:])]
+    x = d['icd'].dropna()
+    dist = pd.cut(x, bins, labels=etiquetas, right=False, include_lowest=True).value_counts().reindex(etiquetas)
+    distribucion = pd.DataFrame({'rango_icd': etiquetas, 'skus': dist.fillna(0).astype(int).values})
+    distribucion['pct_skus'] = (distribucion['skus'] / max(1, len(x)) * 100).round(1)
+    return {'por_sku': d[['sucursal', 'sku', 'clase_abc', 'segmento_original', 'semanas_sin_venta',
+                          'semanas_censuradas', 'icd']],
+            'por_clase_abc': por('clase_abc'), 'por_segmento': por('segmento_original').rename(
+                columns={'segmento_original': 'segmento'}),
+            'por_sucursal': por('sucursal'),
+            'empresa': pd.DataFrame([dict({'nivel': 'Empresa'}, **_icd_grupo(d))], columns=['nivel'] + COLUMNAS_ICD),
+            'distribucion': distribucion}
+
+
+SIN_SUCURSAL = 'Sin dato'
+
+
 def exportar_excel(resultados, ruta):
     """Exporta los resultados del análisis de censura a un Excel."""
     with pd.ExcelWriter(ruta, engine='openpyxl') as xw:
@@ -212,6 +284,10 @@ def exportar_excel(resultados, ruta):
         resultados['por_clase_abc'].to_excel(xw, sheet_name='Por Clase ABC', index=False)
         resultados['cambios_segmento'].to_excel(xw, sheet_name='Cambios de Segmento', index=False)
         resultados['por_sku'].to_excel(xw, sheet_name='Detalle por SKU', index=False)
+        icd = indice_ceguera(resultados['por_sku'])
+        for clave, hoja in (('empresa', 'ICD Empresa'), ('por_clase_abc', 'ICD por ABC'),
+                            ('por_segmento', 'ICD por Segmento'), ('distribucion', 'ICD Distribución')):
+            icd[clave].to_excel(xw, sheet_name=hoja, index=False)
 
         from openpyxl.styles import Font, PatternFill
         from openpyxl.utils import get_column_letter

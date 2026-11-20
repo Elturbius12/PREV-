@@ -447,7 +447,8 @@ def test_analisis_censura_exporta_excel(tmp_path):
     r = ac.analizar_censura(panel, None)
     ruta = ac.exportar_excel(r, str(tmp_path / 'c.xlsx'))
     assert pd.ExcelFile(ruta).sheet_names == ['Resumen Global', 'Por Clase ABC', 'Cambios de Segmento',
-                                              'Detalle por SKU']
+                                              'Detalle por SKU', 'ICD Empresa', 'ICD por ABC',
+                                              'ICD por Segmento', 'ICD Distribución']
 
 
 # ══════════════════════════════════════════════════════════════════
