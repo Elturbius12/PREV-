@@ -155,6 +155,9 @@ class VistaInicio(Vista):
         comp = d.comparacion
         actual = comp['actual'] if comp else None
 
+        # ── Qué hacer hoy (lo primero que ve el usuario: decisiones, no tablas) ──
+        self._panel_hoy(d, k)
+
         # ── Ciclo de compras ──
         if ci:
             card = Card(self.cont, padx=20, pady=16)
@@ -208,6 +211,8 @@ class VistaInicio(Vista):
         binf.set_command(lambda: app.menu_informe(binf))
         binf.pack(side='left', padx=(S(10), 0))
         Btn(acc, 'Abrir carpeta de resultados', app.abrir_carpeta_resultados, 'ghost', 'md'
+            ).pack(side='left', padx=(S(10), 0))
+        Btn(acc, '📊 Cuadros y figuras del artículo', app.exportar_articulo, 'ghost', 'md'
             ).pack(side='left', padx=(S(10), 0))
 
         # ── Salud del inventario ──
@@ -265,6 +270,35 @@ class VistaInicio(Vista):
                           mono=True).pack(side='right')
                     label(fr, f'Ahora {ahora} u · Antes {antes} u    ', 9, color=TEXT_DIM, mono=True
                           ).pack(side='right')
+
+
+    def _panel_hoy(self, d, k):
+        """Tarjeta con las acciones priorizadas del día: una frase, un porqué y un botón cada una."""
+        colores = {'urgente': DANGER, 'importante': WARN, 'info': ACCENT}
+        card = Card(self.cont, padx=20, pady=16)
+        card.pack(fill='x', padx=S(PADX), pady=(0, S(14)))
+        top = tk.Frame(card.body, bg=SURFACE)
+        top.pack(fill='x', pady=(0, S(8)))
+        label(top, 'Qué hacer hoy', 13, 'bold').pack(side='left')
+        prec = d.precision_historica()
+        if prec is not None:
+            nivel = 'alta' if prec >= 70 else ('media' if prec >= 50 else 'baja')
+            label(top, f'Precisión comprobada con tus ventas reales: {prec:.0f}% ({nivel})', 9,
+                  color=TEXT_DIM).pack(side='right')
+        for i, a in enumerate(d.acciones_hoy(k)):
+            fr = tk.Frame(card.body, bg=SURFACE)
+            fr.pack(fill='x', pady=(S(6) if i else 0, 0))
+            cv = tk.Canvas(fr, width=S(10), height=S(10), bg=SURFACE, highlightthickness=0, bd=0)
+            cv.create_oval(0, 0, S(10), S(10), fill=colores[a['nivel']], outline='')
+            cv.pack(side='left', anchor='n', pady=(S(5), 0), padx=(0, S(10)))
+            txt = tk.Frame(fr, bg=SURFACE)
+            txt.pack(side='left', fill='x', expand=True)
+            label(txt, f'{i + 1}. {a["titulo"]}', 11, 'bold', wraplength=S(620), justify='left').pack(anchor='w')
+            label(txt, a['detalle'], 9, color=TEXT_DIM, wraplength=S(620), justify='left').pack(anchor='w')
+            if a['boton']:
+                Btn(fr, a['boton'], lambda a=a: self.app.ir(a['destino'], **({'filtro': a['filtro']}
+                                                                            if a['filtro'] else {})),
+                    'primary' if a['nivel'] == 'urgente' else 'soft', 'sm').pack(side='right', anchor='n')
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -371,7 +405,8 @@ class VistaGenerar(Vista):
 # RECOMENDACIONES — bandeja de entrada
 # ══════════════════════════════════════════════════════════════════
 FILTROS = [('pend', 'Pendientes'), ('urg', 'Urgentes'), ('pronto', 'Pronto'), ('mon', 'Monitorear'),
-           ('comp', 'Comprados'), ('posp', 'Pospuestos'), ('desc', 'Descartados'), ('todo', 'Todos')]
+           ('comp', 'Comprados'), ('posp', 'Pospuestos'), ('desc', 'Descartados'), ('revisar', 'Revisar'), ('liquidar', 'Liquidar'),
+           ('todo', 'Todos')]
 PAGINA = 40
 RAZONES = ['Sin presupuesto', 'Tengo stock en otra sucursal', 'Proveedor sin disponibilidad',
            'Ya no lo vendo']
@@ -446,6 +481,10 @@ class VistaRecom(Vista):
             return est == 'pospuesto'
         if clave == 'desc':
             return est == 'descartado'
+        if clave == 'revisar':
+            return df['revisar_antes_de_comprar']
+        if clave == 'liquidar':
+            return df['accion'] == 'LIQUIDAR'
         return pd.Series(True, index=df.index)
 
     def _filtrar(self):
@@ -477,7 +516,7 @@ class VistaRecom(Vista):
         est = df['sku'].map(d.estado)
         for clave, nombre in FILTROS:
             n = int(self._mascara(clave, df, est).sum())
-            if clave in ('comp', 'posp', 'desc') and n == 0 and self.filtro != clave:
+            if clave in ('comp', 'posp', 'desc', 'revisar', 'liquidar') and n == 0 and self.filtro != clave:
                 continue
             Btn(self.frame_filtros, f'{nombre} · {n}', lambda c=clave: self._set_filtro(c),
                 'soft' if clave == self.filtro else 'ghost', 'sm').pack(side='left', padx=(0, S(4)))

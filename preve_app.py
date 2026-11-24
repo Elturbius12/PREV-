@@ -889,6 +889,47 @@ class PreveApp:
             return
         self.abrir_archivo(carpeta)
 
+    def exportar_articulo(self):
+        """Un clic: genera todas las tablas (Excel/CSV) y figuras (PNG) del artículo en salida/articulo."""
+        if getattr(self, '_articulo_en_curso', False):
+            self.toast('Los cuadros del artículo ya se están generando…', 'info')
+            return
+        rapido = messagebox.askyesnocancel(
+            'Cuadros y figuras del artículo',
+            'PREVÉ va a evaluar los modelos con tus ventas pasadas y guardar todas las tablas y figuras '
+            'listas para el artículo.\n\n'
+            '• Sí  → versión rápida (unos minutos, horizonte de 14 días)\n'
+            '• No  → versión completa (todos los horizontes; puede tardar bastante)\n\n'
+            'Puedes seguir usando la app mientras tanto.')
+        if rapido is None:
+            return
+        base = os.path.dirname(os.path.abspath(__file__))
+        cmd = [sys.executable, os.path.join(base, 'generar_resultados_articulo.py')] + (['--rapido'] if rapido else [])
+        carpeta = os.path.join(base, 'salida', 'articulo')
+        self._articulo_en_curso = True
+        self.toast('Generando cuadros y figuras del artículo en segundo plano…', 'info')
+
+        def trabajo():
+            flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            r = subprocess.run(cmd, cwd=base, capture_output=True, text=True, encoding='utf-8',
+                               errors='replace', creationflags=flags)
+            if r.returncode != 0:
+                ult = (r.stdout or r.stderr or '').strip().splitlines()[-3:]
+                raise RuntimeError(' '.join(ult) or f'código {r.returncode}')
+            return carpeta
+
+        def listo(res, err):
+            self._articulo_en_curso = False
+            if err:
+                logger.error('Exportación del artículo falló: %s', err)
+                self.toast(f'No se pudieron generar los cuadros: {err}', 'error',
+                           accion=('Ver log', lambda: self.abrir_archivo(os.path.join(carpeta, 'log_articulo.txt'))))
+                return
+            notificar_windows('PREVÉ', 'Cuadros y figuras del artículo listos.')
+            self.toast('Cuadros y figuras listos (tablas_articulo.xlsx, Figura_*.png, metodologia.txt).', 'ok',
+                       accion=('Abrir carpeta', lambda: self.abrir_archivo(res)))
+        self.en_segundo_plano(trabajo, listo)
+
     def abrir_archivo(self, path):
         if not os.path.exists(path):
             self.toast('Ese archivo todavía no existe.', 'warn')

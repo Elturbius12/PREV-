@@ -451,6 +451,58 @@ class Datos:
             'revisar_n': int(d['revisar_antes_de_comprar'].sum()),
         }
 
+    def acciones_hoy(self, k=None):
+        """Lista priorizada de lo que el usuario debe hacer hoy, en lenguaje simple.
+
+        Cada acción: {'nivel': 'urgente'|'importante'|'info', 'titulo', 'detalle', 'boton', 'destino', 'filtro'}.
+        Solo usa columnas reales; si un dato no existe, la acción no aparece (no se inventa nada).
+        """
+        if not self.tiene_datos:
+            return []
+        k = k or self.kpis()
+        d, pend = self.df, self.pendientes()
+        acc = []
+        if len(pend):
+            quiebre = pend[pend['stock_actual'] <= 0]
+            if len(quiebre):
+                acc.append({'nivel': 'urgente',
+                            'titulo': f'{len(quiebre)} productos ya están sin stock: pídelos hoy',
+                            'detalle': f'Inversión: {fmt_soles(quiebre["costo_total_compra_pen"].sum())}. '
+                                       'Cada día sin stock es venta perdida.',
+                            'boton': 'Ver y pedir', 'destino': 'recom', 'filtro': 'urg'})
+            urg = pend[(pend['urgencia'] == 'URGENTE') & (pend['stock_actual'] > 0)]
+            if len(urg):
+                acc.append({'nivel': 'urgente',
+                            'titulo': f'{len(urg)} productos se agotan antes de que llegue el pedido',
+                            'detalle': f'El proveedor tarda {lead_time()} días. Inversión: '
+                                       f'{fmt_soles(urg["costo_total_compra_pen"].sum())}.',
+                            'boton': 'Ver y pedir', 'destino': 'recom', 'filtro': 'urg'})
+            top = self.top_impacto(20)
+            if len(top):
+                total = pend['costo_total_compra_pen'].sum()
+                parte = top['costo_total_compra_pen'].sum()
+                pct = f' ({parte / total * 100:.0f}% del total)' if total > 0 else ''
+                acc.append({'nivel': 'importante',
+                            'titulo': f'Aprueba las {len(top)} compras más grandes en un par de minutos',
+                            'detalle': f'Suman {fmt_soles(parte)}{pct}. Un producto por pantalla: Comprar o Saltar.',
+                            'boton': 'Decisión rápida', 'destino': 'decision', 'filtro': None})
+        if k and k.get('revisar_n'):
+            acc.append({'nivel': 'importante',
+                        'titulo': f'Revisa {k["revisar_n"]} productos con una venta fuera de lo común',
+                        'detalle': 'Una venta puntual puede inflar la cantidad sugerida. Confírmalos antes de comprar.',
+                        'boton': 'Revisar', 'destino': 'recom', 'filtro': 'revisar'})
+        if k and k.get('capital_muerto'):
+            n_liq = int((d['accion'] == 'LIQUIDAR').sum())
+            acc.append({'nivel': 'info',
+                        'titulo': f'Tienes {fmt_soles(k["capital_muerto"])} parados en {n_liq} productos sin venta',
+                        'detalle': 'Liquidarlos libera caja para comprar lo que sí rota.',
+                        'boton': 'Ver cuáles', 'destino': 'recom', 'filtro': 'liquidar'})
+        if not acc:
+            acc.append({'nivel': 'info', 'titulo': 'Todo en orden: no hay compras pendientes',
+                        'detalle': 'Vuelve a generar la recomendación cuando cargues nuevos reportes del ERP.',
+                        'boton': None, 'destino': None, 'filtro': None})
+        return acc
+
     def precision_historica(self):
         """100 − WMAPE de la última validación real, o None si todavía no hubo validación."""
         if self.scorecard and self.scorecard.get('wmape') is not None:
