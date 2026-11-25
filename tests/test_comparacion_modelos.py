@@ -366,7 +366,8 @@ def test_importancias_van_al_csv_del_analisis(tmp_path):
     import preve_orquestador as orq
     imp = pd.DataFrame({'variable': ['s4', 'stock'], 'importancia': [0.5, 0.2]})
     orq._guardar_importancias(imp, str(tmp_path), lambda m: None)
-    df = pd.read_csv(tmp_path / orq.NOMBRE_IMPORTANCIAS_CSV, encoding='utf-8-sig')
+    from preve_utils import ruta_dato
+    df = pd.read_csv(ruta_dato(str(tmp_path), orq.NOMBRE_IMPORTANCIAS_CSV), encoding='utf-8-sig')
     assert list(df['descripcion']) == ['Ventas promedio de las últimas 4 semanas', 'Stock al inicio de la semana']
     orq._guardar_importancias(None, str(tmp_path / 'no'), lambda m: None)        # sin importancias: no hace nada
 

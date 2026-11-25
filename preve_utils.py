@@ -60,6 +60,22 @@ import re as _re
 
 PATRON_PERIODO = _re.compile(r'^\d{4}-\d{2}-\d{2}_a_\d{4}-\d{2}-\d{2}$')
 NOMBRE_REC_CSV = 'recomendacion_compra.csv'
+SUBCARPETA_DATOS = 'datos'          # CSV internos del período (lo que lee la app, no el usuario)
+
+
+def ruta_dato(carpeta_periodo, nombre, escribir=False):
+    """Ruta de un CSV interno del período: <período>/datos/<nombre>.
+
+    Al escribir crea la subcarpeta. Al leer, si el archivo no está en datos/ pero sí en la raíz
+    (análisis hechos con versiones anteriores), devuelve la ruta antigua.
+    """
+    import os
+    nueva = os.path.join(carpeta_periodo, SUBCARPETA_DATOS, nombre)
+    if escribir:
+        os.makedirs(os.path.dirname(nueva), exist_ok=True)
+        return nueva
+    vieja = os.path.join(carpeta_periodo, nombre)
+    return vieja if not os.path.exists(nueva) and os.path.exists(vieja) else nueva
 
 
 def es_carpeta_periodo(nombre):
@@ -81,7 +97,7 @@ def listar_periodos(carpeta_salida, con_archivo=None):
         return []
     rutas = [os.path.join(carpeta_salida, n) for n in nombres if os.path.isdir(os.path.join(carpeta_salida, n))]
     if con_archivo:
-        rutas = [r for r in rutas if os.path.exists(os.path.join(r, con_archivo))]
+        rutas = [r for r in rutas if os.path.exists(ruta_dato(r, con_archivo))]
     return rutas
 
 

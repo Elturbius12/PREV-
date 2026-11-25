@@ -5,8 +5,8 @@
     python generar_resultados_articulo.py --sucursal "San José" --entrada "C:/datos/SJ"
     python generar_resultados_articulo.py --rapido             # sin horizontes largos ni el zoo completo
 
-Salida: salida/articulo/  →  Tabla_1..Tabla_9 (.xlsx y .csv), Figura_1..Figura_3 (.png), metodologia.txt,
-tablas_articulo.xlsx (todas juntas) y log_articulo.txt.
+Salida: salida/articulo/  →  tablas_articulo.xlsx (todas las tablas, una hoja cada una, con índice),
+figuras/Figura_1..3.png, metodologia.txt, log_articulo.txt y datos_csv/ (las mismas tablas en CSV).
 
 Solo usa las 4 fuentes del ERP (ventas, compras, movimientos, catálogo). No escribe en la base de datos ni
 cambia la configuración. Todo lo no calculable se reporta como "no disponible" en metodologia.txt.
@@ -30,6 +30,8 @@ from preve_utils import get_logger
 logger = get_logger('generar_articulo')
 
 CARPETA = os.path.join('salida', 'articulo')
+CARPETA_FIGURAS = os.path.join(CARPETA, 'figuras')
+CARPETA_CSV = os.path.join(CARPETA, 'datos_csv')
 HORIZONTES = (14, 40, 70, 141)
 MODELOS_HORIZONTE = (mb.MODELO_PRODUCCION, mb.MODELO_GBM, mb.MODELO_GBM_SIN_DISP, mb.MODELO_SBA,
                      mb.nombre_promedio_movil(8))
@@ -61,9 +63,24 @@ class Registro:
 def _guardar(tablas, nombre, df):
     df = df.copy()
     tablas[nombre] = df
-    df.to_csv(os.path.join(CARPETA, f'{nombre}.csv'), index=False, encoding='utf-8-sig')
-    with pd.ExcelWriter(os.path.join(CARPETA, f'{nombre}.xlsx'), engine='openpyxl') as xw:
-        df.to_excel(xw, index=False, sheet_name=nombre[:31])
+    # Un solo Excel con todas las tablas (tablas_articulo.xlsx); los CSV quedan aparte para reproducibilidad
+    df.to_csv(os.path.join(CARPETA_CSV, f'{nombre}.csv'), index=False, encoding='utf-8-sig')
+
+
+def _preparar_carpeta():
+    """Crea salida/articulo/{figuras,datos_csv} y quita lo generado por corridas anteriores (incluido el
+    formato antiguo con un .xlsx y un .csv sueltos por tabla), para que nunca se mezclen resultados."""
+    import glob
+    import shutil
+    for sub in (CARPETA_FIGURAS, CARPETA_CSV):
+        shutil.rmtree(sub, ignore_errors=True)
+        os.makedirs(sub, exist_ok=True)
+    for patron in ('Tabla_*.csv', 'Tabla_*.xlsx', 'Datos_*.csv', 'Datos_*.xlsx', 'Figura_*.png', 'tablas_articulo.xlsx'):
+        for r in glob.glob(os.path.join(CARPETA, patron)):
+            try:
+                os.remove(r)
+            except OSError:
+                pass
 
 
 def _resumen_modelos(detalle):
@@ -109,6 +126,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     os.makedirs(CARPETA, exist_ok=True)
+    _preparar_carpeta()
     log = Registro(os.path.join(CARPETA, 'log_articulo.txt'))
     np.random.seed(args.semilla)
     t_ini = time.time()
@@ -298,9 +316,11 @@ def main(argv=None):
                            + ', '.join(sorted({f'{h} d' for h in pocos['horizonte_dias']})))
 
     with pd.ExcelWriter(os.path.join(CARPETA, 'tablas_articulo.xlsx'), engine='openpyxl') as xw:
-        for k, df in tablas.items():
-            if not k.startswith('Datos_'):
-                df.to_excel(xw, sheet_name=k[:31], index=False)
+        hojas = [k for k in tablas if not k.startswith('Datos_')]
+        pd.DataFrame({'Hoja': [k[:31] for k in hojas], 'Filas': [len(tablas[k]) for k in hojas]}
+                     ).to_excel(xw, sheet_name='Indice', index=False)
+        for k in hojas:
+            tablas[k].to_excel(xw, sheet_name=k[:31], index=False)
 
     figuras(icd, detalle, tablas, log)
     escribir_metodologia(meta, tablas, log, args, time.time() - t_ini)
@@ -320,7 +340,7 @@ def figuras(icd, detalle, tablas, log):
         ax.set_xticks(range(1, len(grupos) + 1), grupos)
         ax.set_xlabel('Clase ABC'); ax.set_ylabel('ICD por SKU'); ax.set_ylim(-0.02, 1.02)
         ax.set_title('Figura 1. Distribución del ICD por categoría ABC')
-        fig.tight_layout(); fig.savefig(os.path.join(CARPETA, 'Figura_1_ICD_por_ABC.png'), dpi=200); plt.close(fig)
+        fig.tight_layout(); fig.savefig(os.path.join(CARPETA_FIGURAS, 'Figura_1_ICD_por_ABC.png'), dpi=200); plt.close(fig)
     if not detalle.empty:
         c = pa.base_comun(detalle)
         pv = c.assign(_a=(c['pronostico'] - c['real']).abs()).groupby(['modelo', 'periodo_inicio']).agg(
@@ -332,7 +352,7 @@ def figuras(icd, detalle, tablas, log):
         ax.set_ylabel('WMAPE (%)'); ax.set_xlabel('Inicio de la ventana')
         ax.set_title('Figura 2. WMAPE por ventana de backtesting y modelo'); ax.legend(fontsize=7, ncol=2)
         fig.autofmt_xdate(); fig.tight_layout()
-        fig.savefig(os.path.join(CARPETA, 'Figura_2_WMAPE_por_ventana.png'), dpi=200); plt.close(fig)
+        fig.savefig(os.path.join(CARPETA_FIGURAS, 'Figura_2_WMAPE_por_ventana.png'), dpi=200); plt.close(fig)
     t7 = tablas.get('Tabla_7_simulacion_compras')
     if t7 is not None and len(t7):
         fig, ax = plt.subplots(figsize=(7, 5))
@@ -342,7 +362,7 @@ def figuras(icd, detalle, tablas, log):
                         xytext=(3, 3), textcoords='offset points')
         ax.set_xlabel('Exceso de inventario simulado (S/.)'); ax.set_ylabel('Nivel de servicio simulado (%)')
         ax.set_title('Figura 3. Nivel de servicio vs exceso de inventario')
-        fig.tight_layout(); fig.savefig(os.path.join(CARPETA, 'Figura_3_servicio_vs_exceso.png'), dpi=200)
+        fig.tight_layout(); fig.savefig(os.path.join(CARPETA_FIGURAS, 'Figura_3_servicio_vs_exceso.png'), dpi=200)
         plt.close(fig)
     else:
         log.limitacion('Figura 3 no disponible (sin simulación de compras).')

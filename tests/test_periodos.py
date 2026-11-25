@@ -183,10 +183,12 @@ def test_pipeline_completo_escribe_todo_en_la_carpeta_de_periodo(carpeta_erp, ca
     per = periodos[0]
     assert es_carpeta_periodo(os.path.basename(per))
     assert os.path.basename(per) == '2025-09-23_a_2025-10-06', per          # 14 días que terminan en la fecha de los datos
-    esperados = {'recomendacion_compra.csv', 'skus_sin_pronostico.csv', 'PREVE_Clasificacion_Productos.xlsx',
-                 'PREVE_Recomendacion_Compra.xlsx', 'dashboard.html'}
-    assert esperados <= set(os.listdir(per)), set(os.listdir(per))
-    assert {'recomendacion_compra_local.csv', 'PREVE_Informe_Gerencia.docx', 'PREVE_Informe_Gerencia.pdf'} <= set(os.listdir(per))
+    # A la vista solo quedan los archivos para el usuario; los CSV internos van en datos/
+    visibles = set(os.listdir(per))
+    assert {'PREVE_Clasificacion_Productos.xlsx', 'PREVE_Recomendacion_Compra.xlsx', 'PREVE_Informe_Gerencia.docx',
+            'PREVE_Informe_Gerencia.pdf', 'datos'} <= visibles, visibles
+    assert not any(n.endswith(('.csv', '.json', '.html')) for n in visibles), visibles
+    assert {'recomendacion_compra.csv', 'skus_sin_pronostico.csv', 'recomendacion_compra_local.csv'} <=         set(os.listdir(os.path.join(per, 'datos')))
     # En la raíz solo queda lo que no es resultado de un análisis
     raiz = set(os.listdir(carpeta_salida))
     assert raiz == {os.path.basename(per), 'ordenes_compra_abiertas.csv'}, raiz

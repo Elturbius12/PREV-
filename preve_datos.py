@@ -17,9 +17,9 @@ import numpy as np
 import pandas as pd
 
 import preve_historial as hist
-from preve_ciclo import cargar_estado_ciclo, CicloCorruptoError
+from preve_ciclo import cargar_estado_ciclo, CicloCorruptoError, ancla_calendario, ciclo_de_calendario
 from preve_config import Config
-from preve_utils import get_logger, ultimo_periodo as _ultimo_periodo, NOMBRE_REC_CSV
+from preve_utils import get_logger, ultimo_periodo as _ultimo_periodo, NOMBRE_REC_CSV, ruta_dato
 
 logger = get_logger('datos')
 
@@ -301,7 +301,7 @@ class Datos:
         if not carpeta or not os.path.isdir(carpeta):
             return
         self.carpeta_periodo = self._periodo_fijo or self.ultimo_periodo()
-        csv_path = os.path.join(self.carpeta_periodo, NOMBRE_REC_CSV) if self.carpeta_periodo else None
+        csv_path = ruta_dato(self.carpeta_periodo, NOMBRE_REC_CSV) if self.carpeta_periodo else None
         if csv_path and os.path.exists(csv_path):
             try:
                 raw = pd.read_csv(csv_path, dtype={'sku': str})
@@ -389,17 +389,24 @@ class Datos:
         return self.comparacion['previa_por_sku'].get(str(sku))
 
     # ── ciclo ──────────────────────────────────────────────
-    def info_ciclo(self):
-        """Estado del ciclo calculado con la fecha de hoy."""
-        if not self.ciclo or 'ciclo_inicio' not in self.ciclo:
+    def info_ciclo(self, hoy=None):
+        """Estado del ciclo calculado con la fecha de hoy (calendario fijo si está activo)."""
+        hoy = hoy or datetime.date.today()
+        ancla = ancla_calendario()
+        if ancla is not None:
+            total = int(duracion_ciclo())
+            numero, inicio, _ = ciclo_de_calendario(hoy, ancla, total)
+        elif not self.ciclo or 'ciclo_inicio' not in self.ciclo:
             return None
-        total = int(self.ciclo.get('ciclo_dias') or duracion_ciclo())
-        inicio = datetime.date.fromisoformat(self.ciclo['ciclo_inicio'])
-        hoy = datetime.date.today()
+        else:
+            total = int(self.ciclo.get('ciclo_dias') or duracion_ciclo())
+            inicio = datetime.date.fromisoformat(self.ciclo['ciclo_inicio'])
+            numero = self.ciclo.get('ciclo_numero', 1)
         dia = (hoy - inicio).days + 1
         limite = inicio + datetime.timedelta(days=total - 1)
         return {
-            'numero': self.ciclo.get('ciclo_numero', 1),
+            'numero': numero,
+            'inicio': inicio,
             'dia': max(1, min(dia, total)),
             'dias_totales': total,
             'dias_restantes': max(0, (limite - hoy).days),

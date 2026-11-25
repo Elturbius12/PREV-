@@ -41,6 +41,60 @@ class CicloCorruptoError(RuntimeError):
     """El estado del ciclo existe pero no se puede leer. Requiere intervención del usuario."""
 
 
+def ancla_calendario(conf=None):
+    """Día 1 del calendario fijo (datetime.date), o None si el calendario fijo está apagado.
+
+    Si `calendario_inicio` está vacío se fija el 1 de enero del año en curso y se guarda, para que el
+    calendario no se mueva al cambiar de año.
+    """
+    if conf is None:
+        from preve_config import Config
+        conf = Config.actual()
+    if not conf.get('calendario_fijo'):
+        return None
+    txt = (conf.get('calendario_inicio') or '').strip()
+    try:
+        return datetime.date.fromisoformat(txt[:10])
+    except ValueError:
+        ancla = datetime.date(datetime.date.today().year, 1, 1)
+        try:
+            conf.set('calendario_inicio', ancla.isoformat())
+        except Exception:  # noqa: BLE001 — si no se puede guardar, igual se usa el 1 de enero
+            pass
+        return ancla
+
+
+def ciclo_de_calendario(fecha, ancla, duracion_dias=CICLO_INTERNACIONAL_DIAS):
+    """(número de ciclo, inicio del ciclo, día del ciclo 1-based) de `fecha` en el calendario fijo.
+
+    Ej.: ancla 1-ene, 105 días → 1-ene es ciclo 1 día 1; 15-abr es ciclo 1 día 105; 16-abr es ciclo 2 día 1.
+    Una fecha anterior al ancla cuenta como el día 1 del ciclo 1.
+    """
+    duracion_dias = int(duracion_dias)
+    transcurridos = max(0, (fecha - ancla).days)
+    numero = transcurridos // duracion_dias + 1
+    inicio = ancla + datetime.timedelta(days=(numero - 1) * duracion_dias)
+    return numero, inicio, transcurridos - (numero - 1) * duracion_dias + 1
+
+
+def calendario_ciclos(ancla, duracion_dias=CICLO_INTERNACIONAL_DIAS, hasta=None, extra=1):
+    """Lista de ciclos del calendario fijo desde el ancla hasta `hasta` (hoy) + `extra` ciclos futuros.
+
+    Cada ciclo: {'numero', 'inicio', 'pedido' (último día = fecha del pedido), 'preliminar_hasta',
+    'borrador_hasta'}.
+    """
+    hasta = hasta or datetime.date.today()
+    n_actual, _, _ = ciclo_de_calendario(hasta, ancla, duracion_dias)
+    lim_pre, lim_bor = limites_etiqueta(duracion_dias)
+    td = datetime.timedelta
+    out = []
+    for n in range(1, n_actual + extra + 1):
+        ini = ancla + td(days=(n - 1) * duracion_dias)
+        out.append({'numero': n, 'inicio': ini, 'pedido': ini + td(days=duracion_dias - 1),
+                    'preliminar_hasta': ini + td(days=lim_pre - 1), 'borrador_hasta': ini + td(days=lim_bor - 1)})
+    return out
+
+
 def limites_etiqueta(duracion_dias):
     """(último día PRELIMINAR, último día BORRADOR) para un ciclo de esa duración. 105 → (42, 84)."""
     return round(duracion_dias * FRACCION_PRELIMINAR), round(duracion_dias * FRACCION_BORRADOR)
@@ -130,9 +184,10 @@ def iniciar_ciclo(carpeta_salida, fecha_inicio=None, guardar=True, anterior=None
 
 
 def registrar_importacion(carpeta_salida, fecha=None, guardar=True, sucursal=None,
-                          duracion_dias=CICLO_INTERNACIONAL_DIAS):
+                          duracion_dias=CICLO_INTERNACIONAL_DIAS, ancla=None):
     """Registra una nueva importación de datos en el ciclo actual.
 
+    ancla: día 1 del calendario fijo (ver ancla_calendario). None = el ciclo empieza en la primera importación.
     guardar=False devuelve la misma información sin escribir nada (vista previa al iniciar el análisis;
     la importación se confirma con guardar=True cuando el análisis termina bien).
     Varias importaciones el mismo día cuentan como una sola.
@@ -145,7 +200,14 @@ def registrar_importacion(carpeta_salida, fecha=None, guardar=True, sucursal=Non
     duracion_dias = int(duracion_dias)
     estado = cargar_estado_ciclo(carpeta_salida, sucursal)
 
-    if estado is None:
+    if ancla is not None:
+        # Calendario fijo: el ciclo y el día salen de la fecha, no de cuándo fue la primera importación
+        numero, inicio_cal, _ = ciclo_de_calendario(fecha, ancla, duracion_dias)
+        if (estado is None or estado.get('ciclo_inicio') != str(inicio_cal)
+                or estado.get('ciclo_numero') != numero):
+            estado = {'ciclo_inicio': str(inicio_cal), 'ciclo_dias': duracion_dias, 'importaciones': [],
+                      'ciclo_numero': numero}
+    elif estado is None:
         # Primera vez — iniciar ciclo automáticamente
         estado = iniciar_ciclo(carpeta_salida, fecha, guardar=False, anterior={}, sucursal=sucursal,
                                duracion_dias=duracion_dias)

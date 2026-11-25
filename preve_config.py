@@ -87,6 +87,13 @@ DEFAULTS = {
     'usar_asignacion_modelos': (False, 'bool',
                                 'Producción usa, para cada producto, el modelo elegido en el último modo '
                                 'comparación (si lo hay). Apagado = el modelo de siempre.'),
+    'calendario_fijo': (True, 'bool',
+                        'Los ciclos de compra siguen un calendario fijo que empieza en calendario_inicio '
+                        '(día 1, 2, … hasta el día del pedido), sin importar cuándo se genera la recomendación.'),
+    'calendario_inicio': ('', 'string', 'Día 1 del calendario de compras (AAAA-MM-DD). Vacío = 1 de enero del año '
+                                        'en que se usa por primera vez (se guarda para que no cambie).'),
+    'generar_dashboard_html': (False, 'bool', 'Además del tablero dentro de la app, guardar dashboard.html en '
+                                              'cada análisis.'),
     'umbral_censura_alerta': (0.4, 'float',
                                'Fracción de días de las últimas 13 semanas sin stock a partir de la cual la '
                                'recomendación se marca como de menor confianza (0.0–1.0).'),

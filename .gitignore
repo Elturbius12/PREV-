@@ -75,3 +75,6 @@ Thumbs.db
 dist/
 build/
 *.spec
+
+# Respaldos ZIP de "Reiniciar PREVÉ" (contienen datos reales)
+respaldos_depurar/

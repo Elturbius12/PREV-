@@ -11,6 +11,7 @@ El contenido se describe una sola vez como una lista de bloques y dos
 "renderizadores" lo escriben en .docx y en .pdf.
 """
 import os
+from preve_utils import ruta_dato
 import shutil
 import tempfile
 import datetime
@@ -146,7 +147,7 @@ def construir_contenido(carpeta_salida, sucursal='San José', carpeta_tmp=None, 
     urg = rec[rec['urgencia'] == 'URGENTE']
     inv_urg = float(urg['costo_total_compra_pen'].sum()) if len(urg) else 0.0
     sin_pron = 0
-    ruta_sp = os.path.join(d.carpeta_periodo, 'skus_sin_pronostico.csv')
+    ruta_sp = ruta_dato(d.carpeta_periodo, 'skus_sin_pronostico.csv')
     if os.path.exists(ruta_sp):
         try:
             sin_pron = len(pd.read_csv(ruta_sp))
@@ -404,7 +405,7 @@ NOMBRE_ATIPICOS_CSV = 'pedidos_atipicos.csv'
 
 def _leer_pedidos_atipicos(carpeta_periodo):
     """DataFrame fecha/producto/cliente/unidades de los pedidos atípicos de los últimos 90 días, o None."""
-    ruta = os.path.join(carpeta_periodo or '', NOMBRE_ATIPICOS_CSV)
+    ruta = ruta_dato(carpeta_periodo or '', NOMBRE_ATIPICOS_CSV)
     if not carpeta_periodo or not os.path.exists(ruta):
         return None
     try:

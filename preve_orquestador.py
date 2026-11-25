@@ -11,12 +11,13 @@ from preve_pipeline import (
     construir_panel_y_segmentacion, entrenar_y_pronosticar, calcular_recomendacion,
     cargar_ordenes_abiertas,
 )
-from preve_ciclo import registrar_importacion, resumen_ciclo_texto
+from preve_ciclo import registrar_importacion, resumen_ciclo_texto, ancla_calendario
 from preve_config import Config
 from preve_validacion import generar_scorecard
 from preve_historial import registrar_ejecucion
 from preve_simulacion import simular, generar_excel_simulacion
-from preve_utils import (get_logger, log_info, listar_periodos, fin_de_periodo, nombre_periodo, NOMBRE_REC_CSV)
+from preve_utils import (get_logger, log_info, listar_periodos, fin_de_periodo, nombre_periodo, NOMBRE_REC_CSV,
+                         ruta_dato)
 from database import slug
 
 logger = get_logger('orquestador')
@@ -76,8 +77,9 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
     # ── Ciclo: vista previa (se confirma recién al terminar con éxito) ──
     # FIX: antes la importación se registraba al inicio aunque el pipeline fallara después
     progreso('Calculando la posición en el ciclo de compras...')
+    ancla = ancla_calendario(conf)
     info_ciclo = registrar_importacion(carpeta_salida, guardar=False, sucursal=sucursal,
-                                       duracion_dias=principal['duracion_dias'])
+                                       duracion_dias=principal['duracion_dias'], ancla=ancla)
     etiqueta = info_ciclo['etiqueta']
     progreso(resumen_ciclo_texto(info_ciclo))
 
@@ -149,12 +151,14 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
     _generar_excel(rec_int, sin_pronostico, carpeta_p, progreso,
                    etiqueta=etiqueta, info_ciclo=info_ciclo)
     _generar_notas_compra_proveedor(rec_int, carpeta_p, progreso, etiqueta=etiqueta)
-    _generar_dashboard(rec_int, sin_pronostico, carpeta_p, progreso,
-                       etiqueta=etiqueta, info_ciclo=info_ciclo, horizonte_semanas=params.horizonte_semanas)
+    # El tablero se ve dentro de la app (vista «Tablero»); el dashboard.html solo si se pide en la configuración
+    if conf.get('generar_dashboard_html'):
+        _generar_dashboard(rec_int, sin_pronostico, carpeta_p, progreso,
+                           etiqueta=etiqueta, info_ciclo=info_ciclo, horizonte_semanas=params.horizonte_semanas)
 
-    rec_int.to_csv(os.path.join(carpeta_p, NOMBRE_REC_CSV), index=False)
+    rec_int.to_csv(ruta_dato(carpeta_p, NOMBRE_REC_CSV, True), index=False)
     _guardar_pedidos_atipicos(pedidos_atipicos, fecha_datos, carpeta_p, progreso)
-    sin_pronostico.to_csv(os.path.join(carpeta_p, 'skus_sin_pronostico.csv'), index=False)
+    sin_pronostico.to_csv(ruta_dato(carpeta_p, 'skus_sin_pronostico.csv', True), index=False)
 
     # ══════════════════════════════════════════════════════════════════
     # CICLOS SECUNDARIOS (en Yuju: local, 40 días) — FIX (Fase 3): N ciclos configurables, no solo 2
@@ -173,7 +177,7 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
         nota, csv = _archivos_ciclo_secundario(ciclo['nombre'])
         _generar_notas_compra_proveedor(rec_sec, carpeta_p, progreso,
                                         etiqueta=ciclo['nombre'].upper(), nombre_archivo=nota)
-        rec_sec.to_csv(os.path.join(carpeta_p, csv), index=False)
+        rec_sec.to_csv(ruta_dato(carpeta_p, csv, True), index=False)
 
     # ══════════════════════════════════════════════════════════════════
     # VALIDACIÓN AUTOMÁTICA (si existe recomendación anterior)
@@ -184,7 +188,7 @@ def ejecutar_pipeline(carpeta_entrada, carpeta_salida, progreso=log_info,
 
     # FIX: la importación se confirma en el ciclo solo cuando el análisis terminó bien
     info_ciclo = dict(registrar_importacion(carpeta_salida, sucursal=sucursal,
-                                            duracion_dias=principal['duracion_dias']),
+                                            duracion_dias=principal['duracion_dias'], ancla=ancla),
                       ciclo_nombre=principal['nombre'], horizonte_dias=hz_p)
 
     # ══════════════════════════════════════════════════════════════════
@@ -238,7 +242,7 @@ def _guardar_importancias(importancias, carpeta_periodo, log):
         return
     from preve_traducciones import traducir_variable
     df = importancias.assign(descripcion=[traducir_variable(v) for v in importancias['variable']])
-    ruta = os.path.join(carpeta_periodo, NOMBRE_IMPORTANCIAS_CSV)
+    ruta = ruta_dato(carpeta_periodo, NOMBRE_IMPORTANCIAS_CSV, True)
     df[['variable', 'descripcion', 'importancia']].to_csv(ruta, index=False, encoding='utf-8-sig')
     log(f'Importancia de variables del modelo principal: {ruta}')
 
@@ -252,7 +256,7 @@ def _guardar_pedidos_atipicos(registros, fecha_datos, carpeta_periodo, log, dias
     desde = pd.Timestamp(fecha_datos).normalize() - pd.Timedelta(days=dias - 1)
     rec = at[at['fecha'] >= desde].sort_values('fecha', ascending=False)
     rec[['fecha', 'sku', 'producto', 'cliente', 'unidades']].to_csv(
-        os.path.join(carpeta_periodo, 'pedidos_atipicos.csv'), index=False)
+        ruta_dato(carpeta_periodo, 'pedidos_atipicos.csv', True), index=False)
     if len(rec):
         log(f'Pedidos atípicos de los últimos {dias} días: {len(rec):,} pedidos, {rec["unidades"].sum():,.0f} u '
             f'(no se pronostican; se compran contra pedido). Detalle en pedidos_atipicos.csv')
@@ -527,7 +531,7 @@ def ejecutar_simulacion(carpeta_salida, escenario, progreso=log_info):
     # La simulación parte de la recomendación del período más reciente y deja su Excel allí
     from preve_utils import ultimo_periodo
     carpeta_p = ultimo_periodo(carpeta_salida)
-    csv_rec = os.path.join(carpeta_p, NOMBRE_REC_CSV) if carpeta_p else None
+    csv_rec = ruta_dato(carpeta_p, NOMBRE_REC_CSV) if carpeta_p else None
     if not csv_rec or not os.path.exists(csv_rec):
         progreso('⚠ No se encontró recomendacion_compra.csv — ejecuta el pipeline primero.')
         return None
@@ -569,15 +573,17 @@ def _intentar_validacion(rec_actual, ventas_diarias, carpeta_salida, log, fecha_
     fecha_datos = pd.Timestamp(fecha_datos).normalize()
     if carpeta_periodo is None:
         carpeta_periodo = globals()['carpeta_periodo'](carpeta_salida, fecha_datos, fecha_datos)
-    sc_json = os.path.join(carpeta_periodo, NOMBRE_SCORECARD_JSON)
-    # FIX: un scorecard de una corrida anterior nunca debe pasar como el de esta corrida
-    if os.path.exists(sc_json):
-        os.remove(sc_json)
+    sc_json = ruta_dato(carpeta_periodo, NOMBRE_SCORECARD_JSON, True)
+    # FIX: un scorecard de una corrida anterior nunca debe pasar como el de esta corrida (también el de la
+    # ubicación antigua, en la raíz del período)
+    for viejo in (sc_json, os.path.join(carpeta_periodo, NOMBRE_SCORECARD_JSON)):
+        if os.path.exists(viejo):
+            os.remove(viejo)
 
     csv_anterior, fecha_ant, legado = None, None, False
     previo = _periodo_anterior(carpeta_salida, carpeta_periodo)
     if previo:
-        csv_anterior = os.path.join(previo, NOMBRE_REC_CSV)
+        csv_anterior = ruta_dato(previo, NOMBRE_REC_CSV)
         fin = fin_de_periodo(previo)
         fecha_ant = pd.Timestamp(fin).normalize() if fin else None
     else:

@@ -450,11 +450,12 @@ class Paleta:
 # Aplicación
 # ══════════════════════════════════════════════════════════════════
 # Fase 6: en modo backtesting se ocultan el dashboard (Inicio), las sugerencias y los informes
-OCULTAS_EN_BACKTESTING = {'inicio', 'recom', 'decision', 'simular'}
+OCULTAS_EN_BACKTESTING = {'inicio', 'tablero', 'recom', 'decision', 'simular'}
 SOLO_EN_BACKTESTING = {'backtesting'}
 
-NAV = [('inicio', 'Inicio', '⌂'), ('generar', 'Generar', '▶'), ('recom', 'Recomendaciones', '☰'),
-       ('decision', 'Decisión rápida', '⚡'), ('simular', 'Simular', '◐'), ('historial', 'Historial', '↺'),
+NAV = [('inicio', 'Inicio', '⌂'), ('tablero', 'Tablero', '▦'), ('generar', 'Generar', '▶'),
+       ('recom', 'Recomendaciones', '☰'), ('decision', 'Decisión rápida', '⚡'), ('simular', 'Simular', '◐'),
+       ('calendario', 'Calendario', '▤'), ('historial', 'Historial', '↺'),
        # FIX (usabilidad): etiqueta en lenguaje común en vez de "Backtesting"
        ('backtesting', 'Probar qué tan bien acierta PREVÉ', '⟲'),
        ('config', 'Configuración', '⚙')]
@@ -689,7 +690,8 @@ class PreveApp:
         if nombre not in self.vistas:
             clase = dict(inicio=vs.VistaInicio, generar=vs.VistaGenerar, recom=vs.VistaRecom,
                          decision=vs.VistaDecision, simular=vs.VistaSimular, historial=vs.VistaHistorial,
-                         config=vs.VistaConfig, backtesting=self._clase_backtesting())[nombre]
+                         config=vs.VistaConfig, tablero=vs.VistaTablero, calendario=vs.VistaCalendario,
+                         backtesting=self._clase_backtesting())[nombre]
             self.vistas[nombre] = clase(self.area, self)
         return self.vistas[nombre]
 
@@ -802,9 +804,14 @@ class PreveApp:
         self.cfg = dt.cargar_config()
         self.recargar_datos()
         self.refrescar()
-        messagebox.showinfo('Depurar datos — completado',
-                            f'{resumen}\n\nAhora puedes importar datos nuevos para tu prueba de 6 meses.',
-                            parent=self.root)
+        if reporte.get('errores'):
+            messagebox.showwarning('Reinicio con avisos', f'{resumen}\n\nAlgunos elementos no se pudieron borrar '
+                                   '(¿hay un archivo abierto en Excel?). Ciérralo y vuelve a intentarlo.',
+                                   parent=self.root)
+        else:
+            messagebox.showinfo('Listo — PREVÉ empieza de cero', resumen, parent=self.root)
+        if not conservar_config:
+            self.abrir_asistente()
 
     # ── datos / carpetas ───────────────────────────────────
     def carpeta(self, clave):

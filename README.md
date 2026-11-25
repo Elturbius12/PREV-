@@ -38,6 +38,8 @@ cantidad a pedir        = max(0, nivel objetivo − stock − stock en tránsito
 
 El ciclo de mayor horizonte es el principal: define las etiquetas PRELIMINAR / BORRADOR / FINAL y el reporte completo. Los demás generan sus notas de compra.
 
+**Calendario fijo.** Los ciclos se cuentan desde un día 1 (por defecto el 1 de enero; se cambia en *Configuración › Calendario de compras*), sin importar cuándo se genere la recomendación. Con ciclos de 105 días: ciclo 1 = 1 ene–15 abr (el día 105 es la fecha del pedido), ciclo 2 = 16 abr–29 jul, ciclo 3 = 30 jul–11 nov… Una recomendación generada el 9 de noviembre es la del **ciclo 3, día 103 (FINAL)**. La vista *Calendario* muestra todos los ciclos con sus fechas.
+
 ## Instalación
 
 Requiere **Python 3.11+**. En Windows, marca «Add python.exe to PATH» al instalar.
@@ -85,10 +87,14 @@ entrada/                                   ← reportes del ERP
 salida/                                    ← resultados
 ├── ordenes_compra_abiertas.csv            ← lo editas a mano; se queda en la raíz
 ├── 2026-11-06_a_2026-11-19/               ← una subcarpeta por análisis
-│   ├── recomendacion_compra.csv, PREVE_*.xlsx, PREVE_Informe_Gerencia.docx/.pdf, dashboard.html, …
+│   ├── PREVE_Recomendacion_Compra.xlsx, PREVE_Notas_Compra_*.xlsx, PREVE_Clasificacion_Productos.xlsx
+│   ├── PREVE_Informe_Gerencia.docx/.pdf, PREVE_Tablero.xlsx (si lo exportas desde el Tablero)
+│   └── datos/                             ← CSV internos que lee la app (no hace falta abrirlos)
 ```
 
-La app lee siempre el período más reciente (*Inicio → Abrir carpeta de resultados* lo abre). El estado del ciclo vive en la base de datos. «Depurar datos» (Configuración) borra, entre otras cosas, solo las subcarpetas de período de la salida (con respaldo ZIP previo); nunca toca `ordenes_compra_abiertas.csv`. Los archivos sueltos de versiones anteriores no se mueven ni se borran.
+Los cuadros y figuras del artículo (botón *📊 Cuadros y figuras del artículo* en Inicio) quedan en `salida/articulo/`: `tablas_articulo.xlsx` (todas las tablas, una hoja cada una, con índice), `figuras/`, `metodologia.txt` y `datos_csv/`.
+
+La app lee siempre el período más reciente (*Inicio → Abrir carpeta de resultados* lo abre). El estado del ciclo vive en la base de datos. «Reiniciar PREVÉ» (Configuración) borra, entre otras cosas, solo las subcarpetas de período de la salida (con respaldo ZIP previo); nunca toca `ordenes_compra_abiertas.csv`. Los archivos sueltos de versiones anteriores no se mueven ni se borran.
 
 El catálogo de productos se descarga siempre por defecto: de él sale el stock actual. Desmarcar «Actualizar el catálogo» reutiliza el último y deja el stock con la fecha de ese catálogo (solo para pruebas).
 
@@ -96,13 +102,15 @@ El catálogo de productos se descarga siempre por defecto: de él sale el stock 
 
 | Pantalla | Para qué |
 |---|---|
-| Inicio | Resumen: inversión pendiente, urgentes, ciclo, salud del inventario, comparación con el análisis anterior |
+| Inicio | **Qué hacer hoy** (acciones priorizadas con su botón), ciclo, inversión, salud del inventario y botón de cuadros del artículo |
+| Tablero | Gráficos del último análisis con una frase de lectura cada uno; *Exportar tablero a Excel* (tablas + figuras en un archivo) |
+| Calendario | Ciclos fijos de compra: inicio, preliminar, borrador y fecha del pedido |
 | Generar | Carpetas de reportes, importar ventas desde un archivo, descargar desde el ERP y ejecutar el análisis |
 | Recomendaciones | Bandeja por producto: explicación, confianza y decisión (comprado / posponer / descartar) |
 | Decisión rápida | Las 20 compras de mayor impacto, una por una |
 | Simular | ¿Y si la demanda sube 20%? ¿Y si el proveedor tarda más? |
 | Historial | Análisis anteriores con la variación de inversión |
-| Configuración | Empresa, sucursales, ciclos, categorías de acción (con editor visual), ERP (URLs y credenciales de Negosy), parámetros del modelo y «Depurar datos» |
+| Configuración | Empresa, sucursales, ciclos, categorías de acción (con editor visual), ERP (URLs y credenciales de Negosy), calendario, parámetros del modelo y «Reiniciar PREVÉ» (borrar datos o reiniciar todo) |
 | **Modo Backtesting** | Botón naranja de la barra superior: valida el modelo contra el pasado y exporta un Excel |
 
 Atajos: `Ctrl+G` generar · `Ctrl+S` simular · `Ctrl+K` buscar · `Ctrl+H` historial · `Ctrl+R` recomendaciones · `Ctrl+D` decisión rápida · `Ctrl+I` inicio.

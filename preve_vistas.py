@@ -1283,6 +1283,45 @@ class VistaConfig(Vista):
             return
         self.app.toast('Parámetros guardados. Se aplican en el próximo análisis.', 'ok')
 
+    def _card_calendario(self):
+        """Calendario fijo de compras: día 1 configurable; el último día de cada ciclo es la fecha del pedido."""
+        from preve_ciclo import ancla_calendario
+        cfg = dt.Config.actual()
+        card = Card(self.cont, padx=22, pady=18)
+        card.pack(fill='x', padx=S(PADX), pady=(0, S(12)))
+        label(card.body, 'Calendario de compras', 11, 'bold').pack(anchor='w')
+        dur = int(dt.duracion_ciclo())
+        label(card.body, f'Los ciclos de {dur} días se cuentan desde el día 1 que elijas, sin importar cuándo '
+                         f'generes la recomendación. Ej.: si el día 1 es el 1 de enero, el día {dur} (fecha del '
+                         'pedido) es el 15 de abril y el ciclo 2 empieza el 16 de abril.', 9, color=TEXT_DIM,
+              wraplength=S(700), justify='left').pack(anchor='w', pady=(S(2), S(8)))
+        self.var_cal_fijo = tk.BooleanVar(value=bool(cfg.get('calendario_fijo')))
+        tk.Checkbutton(card.body, text='Usar calendario fijo', variable=self.var_cal_fijo, font=f(9), bg=SURFACE,
+                       activebackground=SURFACE, anchor='w').pack(anchor='w')
+        fila = tk.Frame(card.body, bg=SURFACE)
+        fila.pack(anchor='w', pady=(S(6), 0))
+        label(fila, 'Día 1 (AAAA-MM-DD)', 9, 'bold', width=22, anchor='w').pack(side='left')
+        ancla = ancla_calendario(cfg) if cfg.get('calendario_fijo') else None
+        self.var_cal_inicio = tk.StringVar(value=(ancla.isoformat() if ancla else cfg.get('calendario_inicio') or ''))
+        entry(fila, self.var_cal_inicio, width=14).pack(side='left', ipady=S(3))
+        Btn(fila, 'Guardar', self._guardar_calendario, 'primary', 'sm').pack(side='left', padx=(S(10), 0))
+        Btn(fila, 'Ver calendario', lambda: self.app.ir('calendario'), 'ghost', 'sm').pack(side='left',
+                                                                                           padx=(S(6), 0))
+
+    def _guardar_calendario(self):
+        txt = self.var_cal_inicio.get().strip()
+        try:
+            datetime.date.fromisoformat(txt)
+        except ValueError:
+            self.app.toast('Escribe la fecha como AAAA-MM-DD, por ejemplo 2026-01-01.', 'warn')
+            return
+        cfg = dt.Config.actual()
+        cfg.set('calendario_fijo', bool(self.var_cal_fijo.get()))
+        cfg.set('calendario_inicio', txt)
+        self.app.actualizar_sidebar()
+        self.app.toast('Calendario guardado. El ciclo actual se recalcula con esta fecha.', 'ok',
+                       accion=('Ver calendario', lambda: self.app.ir('calendario')))
+
     def _card_comparacion(self):
         """Modo comparación de modelos: interruptores (se guardan al marcar/desmarcar)."""
         from preve_config import ConfigError
@@ -1329,10 +1368,10 @@ class VistaConfig(Vista):
         card.pack(fill='x', padx=S(PADX), pady=(0, S(12)))
         top = tk.Frame(card.body, bg=SURFACE)
         top.pack(fill='x')
-        label(top, 'Depurar datos — empezar de cero', 11, 'bold', DANGER).pack(side='left')
-        label(card.body, 'Borra todo el historial de análisis, pronósticos, métricas y reportes guardados. '
-                         'Útil para hacer una prueba limpia (por ejemplo, backtesting de 6 meses con datos '
-                         'nuevos) sin arrastrar resultados anteriores.', 9, color=TEXT_DIM,
+        label(top, 'Reiniciar PREVÉ — empezar de cero', 11, 'bold', DANGER).pack(side='left')
+        label(card.body, 'Borra los análisis, pronósticos, métricas, decisiones, el ciclo de compras y los reportes '
+                         'guardados (incluidos los cuadros del artículo). Útil para una prueba limpia sin arrastrar '
+                         'resultados anteriores.', 9, color=TEXT_DIM,
               wraplength=S(700), justify='left').pack(anchor='w', pady=(S(4), S(8)))
         prev = depurar.preview_depuracion()
         datos_info = (f'Datos actuales en memoria: '
@@ -1342,18 +1381,18 @@ class VistaConfig(Vista):
                       f'{len(prev["periodos"])} análisis guardados · '
                       f'total: {prev["total_humano"]}')
         label(card.body, datos_info, 9, color=TEXT_MUTED).pack(anchor='w', pady=(0, S(8)))
-        label(card.body, 'Se crea un ZIP de respaldo antes de borrar, dentro de respaldos_depurar/. '
-                         'La configuración (empresa, sucursales, ciclos, plantillas, parámetros) '
-                         'se mantiene para no repetir el asistente inicial.', 9,
+        label(card.body, 'Antes de borrar se guarda un ZIP de respaldo en respaldos_depurar/.\n'
+                         '• Borrar datos: conserva la configuración (empresa, sucursales, ciclos, calendario).\n'
+                         '• Reiniciar todo: deja PREVÉ como recién instalado y vuelve a abrir el asistente.', 9,
               color=TEXT_DIM, wraplength=S(700), justify='left').pack(anchor='w', pady=(0, S(10)))
         fila = tk.Frame(card.body, bg=SURFACE)
         fila.pack(anchor='w')
-        Btn(fila, 'Depurar datos (conservar configuración)',
+        Btn(fila, 'Borrar datos (conservar configuración)',
             lambda: self.app.depurar_datos(conservar_config=True),
-            'danger', 'md').pack(side='left')
-        Btn(fila, 'Borrar TODO (incluye configuración)',
+            'secondary', 'md').pack(side='left')
+        Btn(fila, '⟲ Reiniciar todo desde cero',
             lambda: self.app.depurar_datos(conservar_config=False),
-            'ghost', 'md').pack(side='left', padx=S(8))
+            'danger', 'md').pack(side='left', padx=S(8))
 
     ATAJOS = [('Ctrl + G', 'Generar recomendación (otra vez, para ejecutar)'), ('Ctrl + S', 'Simular (otra vez, para ejecutar)'),
               ('Ctrl + K', 'Buscador global'), ('Ctrl + H', 'Historial'), ('Ctrl + R', 'Recomendaciones'),
@@ -1398,6 +1437,7 @@ class VistaConfig(Vista):
         self._card_empresa()
         self._card_categorias()
         self._card_erp()
+        self._card_calendario()
         self._card_parametros()
         self._card_comparacion()
         self._card_depurar()
@@ -1418,3 +1458,11 @@ class VistaConfig(Vista):
                          'Para usar Inter y JetBrains Mono, copia sus archivos .ttf a la carpeta "fonts" '
                          'junto a la aplicación y reinicia PREVÉ.', 9, color=TEXT_DIM, wraplength=S(700),
               justify='left').pack(anchor='w', pady=(S(4), 0))
+
+
+# ══════════════════════════════════════════════════════════════════
+# TABLERO y CALENDARIO (preve_tablero.py)
+# ══════════════════════════════════════════════════════════════════
+import preve_tablero as _tb  # noqa: E402
+
+VistaTablero, VistaCalendario = _tb.crear_vistas(Vista, PADX, fila_cards, stat_card, estado_vacio)

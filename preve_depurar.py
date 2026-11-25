@@ -44,6 +44,7 @@ ARCHIVOS_BORRABLES = [
     'ciclo_estado.json',
     'preve.log',
     '.coverage',
+    os.path.join('salida', 'corrida_articulo.txt'),
 ]
 # Carpetas completas
 CARPETAS_BORRABLES = [
@@ -51,6 +52,7 @@ CARPETAS_BORRABLES = [
     '__pycache__',
     '.pytest_cache',
     'catboost_info',
+    os.path.join('salida', 'articulo'),       # cuadros y figuras del artículo (se regeneran con un botón)
 ]
 
 # Tablas que se vacían cuando conservar_config=True (se mantienen las de configuración)
@@ -269,6 +271,14 @@ def _vaciar_tablas_de_datos(conservar_config):
                 vaciadas.append({'tabla': t, 'filas': n})
             except sqlite3.Error:
                 logger.warning('No se pudo vaciar la tabla %s', t, exc_info=True)
+        # El estado del ciclo vive en `configuracion`, pero es dato: al empezar de cero el ciclo vuelve a empezar
+        try:
+            n = con.execute("DELETE FROM configuracion WHERE clave LIKE 'ciclo_estado:%'").rowcount
+            if n:
+                vaciadas.append({'tabla': 'configuracion (estado del ciclo)', 'filas': n})
+                total += n
+        except sqlite3.Error:
+            logger.warning('No se pudo borrar el estado del ciclo', exc_info=True)
         # Reset de autoincrement
         try:
             con.execute('DELETE FROM sqlite_sequence')
@@ -378,12 +388,22 @@ def depurar_datos(conservar_config: bool = True, hacer_respaldo: bool = True, ca
     else:
         archivos_a_tocar = list(ARCHIVOS_BORRABLES)
 
+    # La base debe estar cerrada para poder borrarla (en Windows un archivo abierto no se puede borrar)
+    try:
+        from database import Database
+        Database.cerrar_todas()
+    except Exception:  # noqa: BLE001
+        logger.warning('No se pudieron cerrar las conexiones a la base', exc_info=True)
+
     # Borrado real
     for n in archivos_a_tocar:
         r = _ruta(n)
         if os.path.isfile(r):
             try:
-                os.remove(r)
+                if n == 'preve.log':
+                    open(r, 'w').close()      # el log está abierto por la app: se vacía en vez de borrarse
+                else:
+                    os.remove(r)
                 reporte['archivos_borrados'].append(n)
             except OSError as e:
                 reporte['errores'].append(f'{n}: {e}')
