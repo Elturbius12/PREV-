@@ -146,24 +146,28 @@ def _series_por_sku(panel, stock, fecha_fin, skus=None):
     return out
 
 
-def _por_serie(panel, stock, fecha_fin, p, skus, fn, minimo=1):
+MIN_HISTORIA_BASELINE = 4   # mínimo de semanas de historia para cualquier baseline
+
+def _por_serie(panel, stock, fecha_fin, p, skus, fn, minimo=None):
     """Aplica fn(serie) -> (pred_semanal, sigma_semanal) a cada SKU. Sin ventas: no se pronostica (como el
-    pipeline: no se inventa demanda). Con historia más corta que `minimo`: promedio simple."""
+    pipeline: no se inventa demanda). Con historia más corta que `minimo`: se OMITE el SKU (antes se usaba
+    el promedio simple, lo que inflaba el error cuando una venta grande era toda la historia)."""
+    minimo = minimo if minimo is not None else MIN_HISTORIA_BASELINE
     hs = p.horizonte_semanas
     res = []
     for sku, serie in _series_por_sku(panel, stock, fecha_fin, skus).items():
         if len(serie) == 0 or serie.sum() == 0:
             continue
         if len(serie) < minimo:
-            pred, sigma = float(np.mean(serie)), float(np.std(serie))
-        else:
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter('ignore')
-                    pred, sigma = fn(serie)
-            except (ValueError, ZeroDivisionError, FloatingPointError, np.linalg.LinAlgError, KeyError) as e:
-                logger.warning('Modelo falló para %s (%s); se usa el promedio simple', sku, e)
-                pred, sigma = float(np.mean(serie)), float(np.std(serie))
+            # Historia insuficiente: se omite (no se inventa un pronóstico con 1-3 semanas)
+            continue
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                pred, sigma = fn(serie)
+        except (ValueError, ZeroDivisionError, FloatingPointError, np.linalg.LinAlgError, KeyError) as e:
+            logger.warning('Modelo falló para %s (%s); se omite el SKU', sku, e)
+            continue
         if not np.isfinite(pred):
             pred, sigma = float(np.mean(serie)), float(np.std(serie))
         res.append(_filas(sku, pred, sigma if np.isfinite(sigma) else 0.0, hs))
@@ -174,7 +178,7 @@ def _por_serie(panel, stock, fecha_fin, p, skus, fn, minimo=1):
 # Modelos (todos con la firma: panel, seg, dim, stock, fecha_fin, p, log, skus)
 # ══════════════════════════════════════════════════════════════════
 def _naive(panel, seg, dim, stock, fecha_fin, p, log, skus=None):
-    """Repite la última semana."""
+    """Repite la última semana. Requiere al menos MIN_HISTORIA_BASELINE semanas."""
     return _por_serie(panel, stock, fecha_fin, p, skus,
                       lambda s: (float(s[-1]), float(np.std(s)) if len(s) > 1 else 0.0))
 
@@ -274,11 +278,25 @@ def _gbm(usar_disponibilidad):
 
 
 def _croston_tsb(panel, seg, dim, stock, fecha_fin, p, log, skus=None):
-    """El Croston-TSB del pipeline (mismo código), aplicado a todos los SKU con ventas."""
-    from preve_pipeline import _pronosticar_croston_tsb
-    con_venta = set(panel.loc[panel['unidades_venta_neta'] > 0, 'sku'])
-    objetivo = [s for s in seg['sku'] if s in con_venta and (skus is None or s in set(skus))]
-    return _df(_pronosticar_croston_tsb(objetivo, panel, p))
+    """Croston-TSB usando la MISMA serie recortada (_series_por_sku) que los demás baselines.
+
+    Antes usaba panel_full directo (sin recortar ceros previos), lo que producía series distintas
+    al resto de los baselines y un pronóstico inconsistente.
+    """
+    hs = p.horizonte_semanas
+    tsb = dict(p.tsb_params or {})
+    alpha_d, alpha_p = tsb.get('alpha_d', 0.1), tsb.get('alpha_p', 0.1)
+    res = []
+    for sku, serie in _series_por_sku(panel, stock, fecha_fin, skus).items():
+        if len(serie) < MIN_HISTORIA_BASELINE or serie.sum() == 0:
+            continue
+        try:
+            pred, sigma = tsb_negbin_serie(serie, alpha_d, alpha_p)
+        except Exception:
+            continue
+        if np.isfinite(pred):
+            res.append(_filas(sku, pred, sigma if np.isfinite(sigma) else 0.0, hs))
+    return _df(res)
 
 
 def _catboost(panel, seg, dim, stock, fecha_fin, p, log, skus=None):

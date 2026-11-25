@@ -184,10 +184,45 @@ def _pronosticar_gbm(panel_full, stock, fecha_fin, hs, log, inflacion_sigma, usa
         # muestra del entrenamiento. Solo bajo pedido (modo comparación / artículo): es lento.
         extras['importancias'] = importancia_permutacion(modelo, X, y)
 
-    # Incertidumbre: var = a·mu + b·mu² ajustada a los residuos de entrenamiento (sobredispersión de Poisson)
-    mu_tr = np.clip(modelo.predict(X), 1e-6, None)
-    r2 = (y - mu_tr) ** 2
-    ab, *_ = np.linalg.lstsq(np.column_stack([mu_tr, mu_tr ** 2]), r2, rcond=None)
+    # Incertidumbre: var = a·mu + b·mu² ajustada a residuos FUERA DE MUESTRA (leave-one-corte-out).
+    # Antes se usaban residuos de entrenamiento, que subestiman σ porque el modelo se ve a sí mismo.
+    # Ahora: para cada corte k, se entrena sin él y se predicen los SKU de k → residuos OOS.
+    oos_mu, oos_y = [], []
+    # Separar filas por corte (cada corte contribuyó un bloque de filas)
+    limites_corte = []
+    pos = 0
+    for kk in cortes:
+        m = (F.first >= 0) & (F.first < kk)
+        nk = int(m.sum())
+        limites_corte.append((pos, pos + nk))
+        pos += nk
+    if len(cortes) >= 3:
+        # LOO por corte: entrenar sin corte k, predecir corte k
+        for i, kk in enumerate(cortes):
+            lo, hi = limites_corte[i]
+            if hi - lo == 0:
+                continue
+            X_train_loo = pd.concat([X.iloc[:lo], X.iloc[hi:]], ignore_index=True)
+            y_train_loo = np.concatenate([y[:lo], y[hi:]])
+            if len(X_train_loo) < MIN_FILAS:
+                continue
+            m_loo = HistGradientBoostingRegressor(**PARAMS_GBM)
+            m_loo.fit(X_train_loo, y_train_loo)
+            pred_k = np.clip(m_loo.predict(X.iloc[lo:hi]), 1e-6, None)
+            oos_mu.append(pred_k)
+            oos_y.append(y[lo:hi])
+        log(f'  σ calibrado con {len(oos_mu)} folds leave-one-corte-out ({sum(len(m) for m in oos_mu):,} residuos OOS).')
+    if len(oos_mu) >= 2:
+        oos_mu_arr = np.concatenate(oos_mu)
+        oos_y_arr = np.concatenate(oos_y)
+        r2 = (oos_y_arr - oos_mu_arr) ** 2
+        ab, *_ = np.linalg.lstsq(np.column_stack([oos_mu_arr, oos_mu_arr ** 2]), r2, rcond=None)
+    else:
+        # Fallback: si no hay suficientes cortes para LOO, usar residuos de entrenamiento (como antes)
+        mu_tr = np.clip(modelo.predict(X), 1e-6, None)
+        r2 = (y - mu_tr) ** 2
+        ab, *_ = np.linalg.lstsq(np.column_stack([mu_tr, mu_tr ** 2]), r2, rcond=None)
+        log('  σ: pocos cortes para LOO, se usan residuos de entrenamiento (sesgo optimista).')
     a, b = max(float(ab[0]), 0.0), max(float(ab[1]), 0.0)
 
     activos = F.first >= 0

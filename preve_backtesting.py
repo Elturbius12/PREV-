@@ -38,6 +38,9 @@ COLUMNAS_PERIODO = {'sku': 'Código', 'nombre': 'Nombre', 'modelo': 'Modelo', 'c
 
 SIN_DATO = 'Sin dato'
 
+# Horizontes de agregación para el reporte multi-horizonte (en días)
+HORIZONTES_AGREGACION = (28, 56)
+
 
 class BacktestCancelado(Exception):
     pass
@@ -133,17 +136,57 @@ def wmape(df, col_real='real'):
     return float((df['pronostico'] - df[col_real]).abs().sum() / real_tot * 100) if real_tot > 0 else np.nan
 
 
+def mase_rmsse(detalle):
+    """MASE y RMSSE globales a partir del detalle completo (todas las ventanas concatenadas).
+
+    MASE = MAE_modelo / MAE_naive, RMSSE = sqrt(MSE_modelo / MSE_naive), donde el naive es la demanda real
+    del periodo anterior de cada SKU (naive estacional de 1 paso). Solo se usa para SKU con ≥ 2 periodos.
+    Devuelve (mase, rmsse) o (NaN, NaN) si no hay suficientes datos.
+    """
+    if detalle.empty or 'periodo_inicio' not in detalle.columns:
+        return np.nan, np.nan
+    d = detalle[['sku', 'periodo_inicio', 'pronostico', 'real']].copy()
+    d = d.sort_values(['sku', 'periodo_inicio'])
+    d['real_prev'] = d.groupby('sku')['real'].shift(1)
+    d = d.dropna(subset=['real_prev'])
+    if d.empty:
+        return np.nan, np.nan
+    err_modelo = (d['pronostico'] - d['real']).values
+    err_naive = (d['real_prev'] - d['real']).values
+    mae_naive = np.abs(err_naive).mean()
+    mse_naive = (err_naive ** 2).mean()
+    mase = float(np.abs(err_modelo).mean() / mae_naive) if mae_naive > 0 else np.nan
+    rmsse = float(np.sqrt((err_modelo ** 2).mean() / mse_naive)) if mse_naive > 0 else np.nan
+    return mase, rmsse
+
+
+def cobertura_p90(df):
+    """Fracción de observaciones donde real ≤ pronóstico p90 (cobertura del intervalo de predicción).
+
+    Se espera ~90 %. Si es mucho menor, σ está subestimado; si es mucho mayor, sobreestimado.
+    """
+    if df.empty or 'demanda_p90_141d' not in df.columns:
+        return np.nan
+    r, p90 = df['real'].values, df['demanda_p90_141d'].values
+    validos = np.isfinite(r) & np.isfinite(p90)
+    if validos.sum() == 0:
+        return np.nan
+    return float((r[validos] <= p90[validos]).mean() * 100)
+
+
 def resumir(df):
-    """WMAPE, MAE, RMSE, Bias, muestras y MAPE de un DataFrame con pronostico/real/error_pct.
+    """WMAPE, MAE, RMSE, Bias, muestras, MAPE y cobertura p90 de un DataFrame con pronostico/real/error_pct.
 
     El WMAPE es el indicador principal; el MAPE queda al final (ver NOTA_MAPE).
     """
     if df.empty:
-        return {'wmape': np.nan, 'mae': np.nan, 'rmse': np.nan, 'bias': np.nan, 'muestras': 0, 'mape': np.nan}
+        return {'wmape': np.nan, 'mae': np.nan, 'rmse': np.nan, 'bias': np.nan, 'muestras': 0, 'mape': np.nan,
+                'cobertura_p90': np.nan}
     err = df['pronostico'] - df['real']
     return {'wmape': wmape(df, 'real'),
             'mae': float(err.abs().mean()), 'rmse': float(np.sqrt((err ** 2).mean())),
-            'bias': float(err.mean()), 'muestras': int(len(df)), 'mape': float(df['error_pct'].mean())}
+            'bias': float(err.mean()), 'muestras': int(len(df)), 'mape': float(df['error_pct'].mean()),
+            'cobertura_p90': cobertura_p90(df)}
 
 
 def resumir_completo(df):
@@ -178,6 +221,41 @@ def _r(x, n):
     return round(x, n) if x is not None and x == x else None
 
 
+def _metricas_multi_horizonte(periodos, ventana_dias):
+    """Agrupa ventanas consecutivas de `ventana_dias` en bloques de 28 y 56 d y calcula métricas.
+
+    Devuelve DataFrame con horizonte_dias, wmape, mae, rmse, bias, cobertura_p90, muestras.
+    """
+    if not periodos:
+        return pd.DataFrame()
+    filas = [{'horizonte_dias': ventana_dias, **resumir_completo(
+        pd.concat([df for *_, df in periodos], ignore_index=True))}]
+    for hz in HORIZONTES_AGREGACION:
+        n_ventanas = hz // ventana_dias
+        if n_ventanas < 2 or len(periodos) < n_ventanas:
+            continue
+        bloques = []
+        for i in range(0, len(periodos) - n_ventanas + 1, n_ventanas):
+            grupo = periodos[i:i + n_ventanas]
+            dfs = [df for *_, df in grupo]
+            combinado = pd.concat(dfs, ignore_index=True)
+            # Agregar por SKU: sumar pronóstico y real dentro del bloque
+            agg = (combinado.groupby('sku', sort=False)
+                   .agg(pronostico=('pronostico', 'sum'), real=('real', 'sum'), real_total=('real_total', 'sum'),
+                        con_stock=('con_stock', 'first'),
+                        demanda_p90_141d=('demanda_p90_141d', 'sum'))
+                   .reset_index())
+            agg['error_pct'] = error_porcentual(agg['pronostico'], agg['real'])
+            agg['bias'] = agg['pronostico'] - agg['real']
+            bloques.append(agg)
+        if bloques:
+            todo_hz = pd.concat(bloques, ignore_index=True)
+            r = resumir_completo(todo_hz)
+            r['horizonte_dias'] = hz
+            filas.append(r)
+    return pd.DataFrame(filas)
+
+
 # ══════════════════════════════════════════════════════════════════
 # Backtester
 # ══════════════════════════════════════════════════════════════════
@@ -210,7 +288,11 @@ class Backtester:
 
     # ── ventanas ───────────────────────────────────────────
     def ventanas(self, fecha_inicio, fecha_fin):
-        """[(inicio, fin_exclusivo)] de `ventana_dias`, alineadas al lunes (el panel es semanal)."""
+        """[(inicio, fin_exclusivo)] de `ventana_dias`, alineadas al lunes (el panel es semanal).
+
+        Con ventana_dias = 70 o 141 se evalúa a horizontes largos (más cerca de la decisión real de compra).
+        Requiere más historia: con 45 semanas y ventana de 141 d (≈20 sem) solo caben ~1 ventana.
+        """
         ini = pd.Timestamp(fecha_inicio).normalize()
         ini = ini + pd.Timedelta(days=(7 - ini.weekday()) % 7)
         fin = pd.Timestamp(fecha_fin).normalize()
@@ -219,6 +301,11 @@ class Backtester:
         while t + pd.Timedelta(days=self.ventana_dias - 1) <= fin:
             res.append((t, t + pd.Timedelta(days=self.ventana_dias)))
             t += pd.Timedelta(days=self.ventana_dias)
+        if not res and self.ventana_dias > 14:
+            logger.warning('Ventana de %d días demasiado larga para el rango %s – %s (%d días disponibles). '
+                           'Se necesitan al menos %d días de historia previa + %d de evaluación.',
+                           self.ventana_dias, ini.date(), fin.date(), (fin - ini).days,
+                           self.ventana_dias, self.ventana_dias)
         return res
 
     def estado_ventana(self, t, fin):
@@ -407,10 +494,23 @@ class Backtester:
         resultado['duracion_s'] = (datetime.datetime.now() - t0).total_seconds()
         self.progreso(1.0, 'Listo')
         g = resultado['global']
+        mase_txt = f' · MASE {g["mase"]:.2f}' if g.get('mase') == g.get('mase') else ''
+        rmsse_txt = f' · RMSSE {g["rmsse"]:.2f}' if g.get('rmsse') == g.get('rmsse') else ''
+        cob_txt = f' · Cobertura p90 {_pc(g.get("cobertura_p90"))}' if g.get('cobertura_p90') == g.get('cobertura_p90') else ''
         self.log(f'Backtesting terminado: {resultado["total_productos"]:,} productos, {resultado["total_periodos"]} '
                  f'períodos · {ETIQ_WMAPE} {_pc(g["wmape"])} · {ETIQ_WMAPE_TOTAL} {_pc(g["wmape_total"])} · '
-                 f'{ETIQ_WMAPE_STOCK} {_pc(g["wmape_con_stock"])} · MAPE {_pc(g["mape"])} ({NOTA_MAPE})'
+                 f'{ETIQ_WMAPE_STOCK} {_pc(g["wmape_con_stock"])} · Bias {g["bias"]:.2f} u'
+                 f'{mase_txt}{rmsse_txt}{cob_txt}'
+                 f' · MAPE {_pc(g["mape"])} ({NOTA_MAPE})'
                  + (f' → {resultado["ruta_excel"]}' if persistir else ''))
+        # Log multi-horizonte
+        mh = resultado.get('multi_horizonte')
+        if mh is not None and len(mh) > 1:
+            for _, row in mh.iterrows():
+                hz = int(row.get('horizonte_dias', 0))
+                if hz != self.ventana_dias:
+                    self.log(f'  Horizonte {hz} d: WMAPE {_pc(row.get("wmape"))} · '
+                             f'Bias {row.get("bias", 0):.2f} u · Cobertura p90 {_pc(row.get("cobertura_p90"))}')
         return resultado
 
     def _consolidar(self, periodos, omitidas, extras, compras, resumen_compras):
@@ -426,12 +526,24 @@ class Backtester:
         glob = resumir_completo(todo)
         glob['real_total'], glob['atipico'] = float(todo['real_total'].sum()), float(todo['atipico'].sum())
 
+        # MASE y RMSSE globales (requieren >= 2 periodos por SKU)
+        glob['mase'], glob['rmsse'] = mase_rmsse(todo)
+
+        # Métricas multi-horizonte: agrupa ventanas consecutivas de 14 d en bloques de 28, 56 d
+        multi_horizonte = _metricas_multi_horizonte(periodos, self.ventana_dias)
+
+        # Por categoría (dim puede tener 'categoria', 'subcategoria', etc.)
+        por_categoria = desagregar(todo, ['clasificacion', 'clase_abc']).rename(
+            columns={'clasificacion': 'segmento'})
+
         # Métricas desagregadas por segmento ADI/CV², clase ABC y modelo (WMAPE/MAE/Bias reales de cada grupo)
         return {'sucursal': self.sucursal, 'ventana_dias': self.ventana_dias, 'global': glob,
                 'por_segmento': desagregar(todo, ['clasificacion']).rename(columns={'clasificacion': 'segmento'}),
                 'por_clase_abc': desagregar(todo, ['clase_abc']),
                 'por_segmento_modelo': desagregar(todo, ['clasificacion', 'modelo']).rename(
                     columns={'clasificacion': 'segmento'}),
+                'por_categoria': por_categoria,
+                'multi_horizonte': multi_horizonte,
                 'mape_promedio': glob['mape'], 'excluye_atipicos': self._excluye_atipicos(), 'total_productos': int(todo['sku'].nunique()),
                 'total_periodos': len(periodos), 'periodos': periodos, 'detalle': todo, 'por_modelo': por_modelo,
                 'evolucion': evolucion, 'peores': evaluables.nlargest(20, 'error_pct'),
@@ -532,6 +644,10 @@ def exportar_excel(r, carpeta, avanzado=None):
         ('MAE (u)', round(g['mae'], 3), 'Error promedio por producto y período, en unidades.'),
         ('RMSE (u)', round(g['rmse'], 3), ''),
         ('Bias medio (u)', round(g['bias'], 3), 'Positivo: el sistema pronostica de más; negativo: de menos.'),
+        ('MASE', _r(g.get('mase'), 3), 'Error relativo al naive (< 1 = mejor que repetir el último periodo).'),
+        ('RMSSE', _r(g.get('rmsse'), 3), 'Raíz del error cuadrático escalado (< 1 = mejor que naive).'),
+        ('Cobertura p90 (%)', _r(g.get('cobertura_p90'), 1),
+         'Fracción de observaciones donde real ≤ p90. Esperado ~90 %.'),
         ('MAPE promedio (%) — ' + NOTA_MAPE, _r(g['mape'], 2), ''),
     ], columns=['Métrica', 'Valor', 'Interpretación'])
     if avanzado:
@@ -578,6 +694,14 @@ def exportar_excel(r, carpeta, avanzado=None):
             r['omitidas'].to_excel(xw, sheet_name='Ventanas omitidas', index=False)
         # Hoja de métricas desagregadas por segmento ADI/CV², clase ABC y segmento × modelo
         _escribir_desagregadas(xw, r, renombre_metricas, avanzado)
+        # Hoja multi-horizonte
+        mh = r.get('multi_horizonte')
+        if mh is not None and len(mh) > 1:
+            mh_cols = {'horizonte_dias': 'Horizonte (días)', 'wmape': 'WMAPE (%)', 'wmape_total': 'WMAPE total (%)',
+                       'mae': 'MAE (u)', 'bias': 'Bias (u)', 'cobertura_p90': 'Cobertura p90 (%)',
+                       'muestras': 'Observaciones'}
+            mh[list(mh_cols)].rename(columns=mh_cols).round(2).to_excel(
+                xw, sheet_name='Multi-horizonte', index=False)
         wb = xw.book
         from openpyxl.styles import Font
         hoja_gen = wb['Resumen General']
@@ -627,6 +751,13 @@ NOTAS_COMPARACION = [
                            'modelo que no pudo pronosticar alguna ventana no compite con menos datos).'),
     ('WMAPE base común', 'WMAPE global de cada modelo sobre los pares (SKU, período) que TODOS los modelos '
                          'pronosticaron: es la comparación global justa.'),
+    ('WMAPE cobertura total', 'WMAPE de cada modelo sobre TODOS los SKU que pronostica (sin restringir a base '
+                              'común). Muestra el rendimiento real incluyendo fallbacks.'),
+    ('SKU cubiertos', 'Cantidad de SKU distintos que el modelo pronosticó. El pipeline cubre todos; los baselines '
+                      'solo los que cumplen su mínimo de historia.'),
+    ('MASE', 'Error relativo al naive estacional (demanda del periodo anterior). MASE < 1: supera al naive.'),
+    ('RMSSE', 'Raíz del error cuadrático escalado por naive. RMSSE < 1: supera al naive.'),
+    ('Cobertura p90', 'Fracción de observaciones donde real ≤ p90. Esperado ~90 %; < 80 % indica σ subestimado.'),
     ('Confianza', 'Alta: WMAPE ≤ 30 %; Media: ≤ 60 %; Baja: > 60 %; Sin dato: Σ real = 0 (preve_traducciones).'),
 ]
 
@@ -673,6 +804,18 @@ def _wmape_base_comun(detalle, modelos):
         return {m: np.nan for m in modelos}
     en_comun = [k in comunes for k in zip(detalle['sku'], detalle['periodo_inicio'])]
     return {m: wmape(g) for m, g in detalle[en_comun].groupby('modelo')}
+
+
+def _wmape_cobertura_total(detalle, modelos):
+    """{modelo: (WMAPE, n_skus)} sobre TODOS los SKU que cada modelo pronostica (sin restringir a base común).
+
+    Esto muestra el rendimiento real de cada modelo incluyendo sus fallbacks: el pipeline con 4,552 SKU,
+    el GBM con ~2,610, etc. Es la comparación justa de lo que cada método produciría en producción.
+    """
+    out = {}
+    for m, g in detalle.groupby('modelo'):
+        out[m] = (wmape(g), int(g['sku'].nunique()))
+    return out
 
 
 def _importancias_comparacion(datos, fecha_fin, params, horizonte_dias, nombres, log):
@@ -781,9 +924,13 @@ def comparar_modelos(datos, fecha_inicio, fecha_fin, params=None, modelos=None, 
     nombres_prod = datos.dim.set_index('sku')['nombre'] if 'nombre' in datos.dim.columns else pd.Series(dtype=object)
     mejor.insert(1, 'nombre', mejor['sku'].map(nombres_prod))
     comunes = _wmape_base_comun(detalle, list(detalles))
+    cob_total = _wmape_cobertura_total(detalle, list(detalles))
     conteo = mejor['modelo'].value_counts()
     resumen = pd.DataFrame([{
-        'modelo': m, 'wmape': g['wmape'], 'wmape_base_comun': comunes.get(m, np.nan), 'wmape_total': g['wmape_total'],
+        'modelo': m, 'wmape': g['wmape'], 'wmape_base_comun': comunes.get(m, np.nan),
+        'wmape_cobertura_total': cob_total.get(m, (np.nan, 0))[0],
+        'skus_cubiertos': cob_total.get(m, (np.nan, 0))[1],
+        'wmape_total': g['wmape_total'],
         'wmape_con_stock': g['wmape_con_stock'], 'mae': g['mae'], 'bias': g['bias'], 'productos': g['productos'],
         'periodos': g['periodos'], 'sku_donde_es_el_mejor': int(conteo.get(m, 0))} for m, g in globales.items()])
     importancias = pd.DataFrame()
@@ -832,6 +979,7 @@ def exportar_comparacion(r, carpeta):
     os.makedirs(carpeta, exist_ok=True)
     ruta = os.path.join(carpeta, f'comparacion_modelos_{datetime.datetime.now():%Y-%m-%d_%H-%M}.xlsx')
     cols_res = {'modelo': 'Modelo', 'wmape': 'WMAPE (%)', 'wmape_base_comun': 'WMAPE base común (%)',
+                'wmape_cobertura_total': 'WMAPE cobertura total (%)', 'skus_cubiertos': 'SKU cubiertos',
                 'wmape_total': 'WMAPE venta total (%)', 'wmape_con_stock': 'WMAPE con stock (%)', 'mae': 'MAE (u)',
                 'bias': 'Bias (u)', 'productos': 'Productos', 'periodos': 'Períodos',
                 'sku_donde_es_el_mejor': 'SKU donde es el mejor'}
@@ -892,3 +1040,38 @@ def exportar_reporte_gestion(r, carpeta):
         for ws in xw.book.worksheets:
             _formatear(ws, {1: 44, 2: 90} if ws.title == 'Resumen' else {2: 44, 3: 44, 5: 46, 7: 70})
     return ruta
+
+
+# ══════════════════════════════════════════════════════════════════
+# Validación multi-ventana (14, 70, 141 d)
+# ══════════════════════════════════════════════════════════════════
+VENTANAS_VALIDACION = (14, 70, 141)
+
+
+def backtesting_multi_ventana(datos, fecha_inicio, fecha_fin, params=None, ventanas=None, **kwargs):
+    """Ejecuta backtesting con múltiples tamaños de ventana (14, 70, 141 d) y consolida los resultados.
+
+    Solo ejecuta las ventanas para las que hay suficiente historia (al menos 2 ventanas caben en el rango).
+    Devuelve {ventana_dias: resultado_backtesting} para las ventanas que pudieron evaluarse.
+
+    Uso:
+        resultados = backtesting_multi_ventana(datos, '2026-05-01', '2026-10-23')
+        for v, r in resultados.items():
+            print(f'{v} d: WMAPE {r["global"]["wmape"]:.1f}%')
+    """
+    ventanas = ventanas or VENTANAS_VALIDACION
+    log = kwargs.get('log', log_info)
+    resultados = {}
+    rango_dias = (pd.Timestamp(fecha_fin) - pd.Timestamp(fecha_inicio)).days
+    for v in ventanas:
+        # Necesitamos al menos 2 ventanas + historia previa para entrenar
+        if rango_dias < v * 2:
+            log(f'  Ventana {v} d: se omite (rango de {rango_dias} días insuficiente, '
+                f'necesita al menos {v * 2}).')
+            continue
+        try:
+            bt = Backtester(datos, params=params, ventana_dias=v, **kwargs)
+            resultados[v] = bt.run(fecha_inicio, fecha_fin, simular_compras=False, persistir=True)
+        except (ValueError, BacktestCancelado) as e:
+            log(f'  Ventana {v} d: no se pudo evaluar ({e})')
+    return resultados
