@@ -98,6 +98,8 @@ Los cuadros y figuras del artículo (botón *📊 Cuadros y figuras del artícul
 
 ### Resultados del artículo (reproducibilidad)
 
+**Desde la app, sin terminal:** copia los 4 reportes del ERP a la carpeta de entrada de la sucursal, genera la recomendación y pulsa *Inicio › 📊 Cuadros y figuras del artículo*. Elige la versión completa y, cuando tus datos sean los finales, responde «Sí» a *Versión definitiva*: se guarda todo en `salida/articulo_canonico/` con su `META.json`. De ahí salen las tablas y figuras para redactar el artículo. Lo mismo, desde la terminal:
+
 ```bash
 pip install -r requirements-lock.txt
 python generar_resultados_articulo.py --congelar          # corrida canónica → salida/articulo_canonico/ + META.json

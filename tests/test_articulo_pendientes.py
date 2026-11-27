@@ -305,3 +305,15 @@ def test_formulacion_compras_refleja_el_codigo():
     for frag in ('1.2816', 'nivel_objetivo', 'cantidad_a_pedir', 'E0', 'E1', 'E2', 'calcular_recomendacion',
                  'stock_en_transito'):
         assert frag in txt, frag
+
+
+# ── Botón del artículo en la app ─────────────────────────────────
+def test_comando_articulo_congelar_solo_en_version_completa():
+    import sys
+    import preve_app
+    base = os.path.join('x', 'y')
+    assert preve_app.comando_articulo(base)[1:] == [os.path.join(base, 'generar_resultados_articulo.py')]
+    assert preve_app.comando_articulo(base, congelar=True)[-1] == '--congelar'
+    r = preve_app.comando_articulo(base, rapido=True, congelar=True)
+    assert r[-1] == '--rapido' and '--congelar' not in r             # una corrida rápida nunca se congela
+    assert preve_app.comando_articulo(base)[0] == sys.executable

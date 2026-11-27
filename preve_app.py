@@ -123,9 +123,20 @@ def notificar_windows(titulo, mensaje):
         logger.warning('No se pudo mostrar la notificación de Windows', exc_info=True)
 
 
+def comando_articulo(base, rapido=False, congelar=False):
+    """Comando que genera los cuadros del artículo (el botón de Inicio lo ejecuta en segundo plano)."""
+    cmd = [sys.executable, os.path.join(base, 'generar_resultados_articulo.py')]
+    if rapido:
+        cmd.append('--rapido')
+    elif congelar:
+        cmd.append('--congelar')
+    return cmd
+
+
 # ══════════════════════════════════════════════════════════════════
 # Pantalla de carga completa
 # ══════════════════════════════════════════════════════════════════
+
 class PantallaCarga(tk.Frame):
     def __init__(self, app):
         super().__init__(app.root, bg=BG)
@@ -910,9 +921,17 @@ class PreveApp:
             'Puedes seguir usando la app mientras tanto.')
         if rapido is None:
             return
+        congelar = False
+        if not rapido:      # congelar una corrida rápida no sirve para el artículo
+            congelar = messagebox.askyesno(
+                'Versión definitiva',
+                '¿Guardar esta corrida como la VERSIÓN DEFINITIVA del artículo?\n\n'
+                'Se copiará todo a salida/articulo_canonico/ junto con un archivo META.json (fecha, versiones, '
+                'huella de tus Excel y comando). Las cifras del artículo se citan de esa carpeta.\n\n'
+                'Elige «Sí» cuando ya hayas subido tus datos finales.')
         base = os.path.dirname(os.path.abspath(__file__))
-        cmd = [sys.executable, os.path.join(base, 'generar_resultados_articulo.py')] + (['--rapido'] if rapido else [])
-        carpeta = os.path.join(base, 'salida', 'articulo')
+        cmd = comando_articulo(base, rapido=rapido, congelar=congelar)
+        carpeta = os.path.join(base, 'salida', 'articulo_canonico' if congelar else 'articulo')
         self._articulo_en_curso = True
         self.toast('Generando cuadros y figuras del artículo en segundo plano…', 'info')
 
@@ -933,7 +952,8 @@ class PreveApp:
                            accion=('Ver log', lambda: self.abrir_archivo(os.path.join(carpeta, 'log_articulo.txt'))))
                 return
             notificar_windows('PREVÉ', 'Cuadros y figuras del artículo listos.')
-            self.toast('Cuadros y figuras listos (tablas_articulo.xlsx, Figura_*.png, metodologia.txt).', 'ok',
+            self.toast('Cuadros y figuras listos' + (' y congelados como versión definitiva' if congelar else '')
+                       + ' (tablas_articulo.xlsx, Figura_*.png, metodologia.txt).', 'ok',
                        accion=('Abrir carpeta', lambda: self.abrir_archivo(res)))
         self.en_segundo_plano(trabajo, listo)
 
