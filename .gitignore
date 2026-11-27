@@ -78,3 +78,6 @@ build/
 
 # Respaldos ZIP de "Reiniciar PREVÉ" (contienen datos reales)
 respaldos_depurar/
+salida_instalador/
+build/
+dist/

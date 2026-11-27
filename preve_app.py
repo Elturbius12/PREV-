@@ -125,7 +125,10 @@ def notificar_windows(titulo, mensaje):
 
 def comando_articulo(base, rapido=False, congelar=False):
     """Comando que genera los cuadros del artículo (el botón de Inicio lo ejecuta en segundo plano)."""
-    cmd = [sys.executable, os.path.join(base, 'generar_resultados_articulo.py')]
+    if getattr(sys, 'frozen', False):        # instalador: el mismo PREVE.exe ejecuta el generador
+        cmd = [sys.executable, '--articulo']
+    else:
+        cmd = [sys.executable, os.path.join(base, 'generar_resultados_articulo.py')]
     if rapido:
         cmd.append('--rapido')
     elif congelar:
@@ -1129,6 +1132,9 @@ class PreveApp:
 
 
 if __name__ == '__main__':
+    if getattr(sys, 'frozen', False) and len(sys.argv) > 1 and sys.argv[1] == '--articulo':
+        import generar_resultados_articulo as _gra
+        sys.exit(_gra.main(sys.argv[2:]) or 0)
     configurar_logging()
     ui.init_dpi()
     root = tk.Tk()
