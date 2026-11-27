@@ -82,13 +82,39 @@ Hoy **no existe ningún test**.
 | M5 | `preve_simulacion.py:89, 117` | `lt_orig = 36` está fijo en el código. El lead time solo escala el SS y no la demanda durante el lead time. La compra ignora el stock en tránsito. | [L-3.1] + **[NUEVO]** |
 | M6 | `preve_pipeline.py:623-624` | El *default* "stock suficiente" se etiqueta **REDUCIR**. Mezcla productos sanos con sobre-stock. Debería ser MANTENER. | **[NUEVO]** (se resuelve en Fase 5) |
 | M7 | `preve_pipeline.py:449, 517` vs `463` | Croston y CatBoost multiplican por 20.14 semanas (141 d), pero LightGBM predice 21 semanas. La demanda de LightGBM sale inflada ~4%. | **[NUEVO]** |
-| M8 | `preve_pipeline.py:470, 513` | Los intervalos P10/P90 usan los residuos **in-sample**, que son demasiado estrechos. Esto subestima el SS y la "confianza". | **[NUEVO]** |
+| M8 | `preve_pipeline.py:470, 513` | Los intervalos P10/P90 usan los residuos **in-sample**, que son demasiado estrechos. Esto subestima el SS y la "confianza". | **[NUEVO]** · ✅ **CERRADO** (ver abajo) |
 | M9 | `preve_datos.py:224` | `fecha_datos` = `mtime` del CSV, es decir, la hora de la corrida y no la fecha de los datos. Las fechas de quiebre que muestra la UI se desplazan. | **[NUEVO]** |
-| M10 | `preve_validacion.py:146-149` | El "sobre-stock evitado" suma el stock sobrante de REDUCIR/LIQUIDAR. Eso no es capital *evitado*, es sobre-stock *existente*. Infla el beneficio. | **[NUEVO]** |
+| M10 | `preve_validacion.py:146-149` | El "sobre-stock evitado" suma el stock sobrante de REDUCIR/LIQUIDAR. Eso no es capital *evitado*, es sobre-stock *existente*. Infla el beneficio. | **[NUEVO]** · ✅ **CERRADO** (ver abajo) |
 | M11 | `preve_orquestador.py:103-106` | El reporte LOCAL recalcula **todos** los productos, también los de proveedores internacionales. No distingue el tipo de proveedor. | **[NUEVO]** (se resuelve en Fase 2/3) |
 | M12 | `preve_pipeline.py:403`, `preve_datos.py:329`, `preve_validacion.py:195` | IGV 1.18 fijo en el código. | [L-3.1] |
 | M13 | `preve_pipeline.py:41-62`, `preve_ciclo.py:28-36`, `preve_datos.py:22`, `preve_orquestador.py:483, 548` | Horizonte, lead time, Z, umbrales y "105" fijos en el código y duplicados. | [L-3.1] |
 | M14 | `preve_historial.py` | Las conexiones no se cierran si hay una excepción (no hay `try/finally` ni `with`). | **[NUEVO]** |
+
+### Cierre de M8 y M10 (preparación del artículo, 2026-11-26)
+
+**M8: intervalos P10/P90 fuera de muestra.**
+- El GBM ya calibra σ con residuos fuera de muestra (leave-one-corte-out en `preve_modelo_gbm.py`, commit 0221395).
+- Para el artículo se agregó `preve_articulo.intervalos_oos`, que arma un intervalo empírico con los residuos
+  del **backtesting walk-forward**. Con `r = real − pronóstico`: `P10 = pronóstico + q10(r)` y
+  `P90 = pronóstico + q90(r)`. Para la fila (modelo, SKU, ventana *t*) solo se usan los residuos del mismo
+  modelo y SKU en ventanas **anteriores** a *t*, y hacen falta al menos 3. Si no los hay, se usan los de la
+  misma clase ABC; si tampoco, el intervalo queda NaN.
+- El signo se tomó de `r = real − pronóstico` porque, si se usara `e = pronóstico − real`, la cota inferior
+  sería `pronóstico − q90(e)`. Las dos expresiones son equivalentes.
+- `cobertura_intervalos` compara la cobertura de este intervalo con la del intervalo paramétrico de cada
+  modelo, sobre las mismas filas (`Tabla_12_cobertura_intervalos_oos.csv`).
+- `cuantiles_residuos_sku` da los cuantiles por SKU sobre **todas** las ventanas, para aplicarlos a un
+  pronóstico nuevo (`Datos_cuantiles_residuos_sku.csv`).
+- La regla de compra de producción no cambia: el intervalo OOS es evidencia de calibración para el artículo.
+
+**M10: exceso evitado.**
+- Se define de forma explícita `exceso_evitado = exceso_baseline − exceso_propuesto`, con baseline = **Naive**
+  (escenario E0, el comprador sin sistema).
+- Se calcula sobre la base común (sucursal, SKU, día de reporte) que ambos modelos simularon y que tiene
+  valorización disponible (`preve_articulo.exceso_evitado`, `resumen_economico(c, baseline=...)`).
+- Va como columna `exceso_evitado_pen` en las Tablas 7, 7b y 11, y está en `SUPUESTOS_VALORIZACION`.
+- El "sobre-stock" de `preve_validacion.py` (stock sobrante de REDUCIR/LIQUIDAR) sigue existiendo en la app como
+  indicador de sobre-stock **existente**. No se usa ni se cita como beneficio en el artículo.
 
 ## 🟢 BAJO
 

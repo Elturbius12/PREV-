@@ -4,6 +4,13 @@
     python generar_resultados_articulo.py                      # sucursales con carpeta de entrada configurada
     python generar_resultados_articulo.py --sucursal "San José" --entrada "C:/datos/SJ"
     python generar_resultados_articulo.py --rapido             # sin horizontes largos ni el zoo completo
+    python generar_resultados_articulo.py --congelar           # además copia todo a salida/articulo_canonico/
+    python generar_resultados_articulo.py --muestra-anonima    # además genera la muestra anónima de 50 SKU
+
+Corrida canónica: con --congelar, al terminar se copia salida/articulo/ a salida/articulo_canonico/ con un
+META.json (fecha, Python, pip freeze, SHA-256 de cada archivo de entrada, comando y commit de git). Toda corrida
+sin --congelar compara el WMAPE de la Tabla 4 con el canónico y avisa (WARNING) si difiere en más de 0,5 pp.
+El artículo cita siempre las cifras de salida/articulo_canonico/.
 
 Salida: salida/articulo/  →  tablas_articulo.xlsx (todas las tablas, una hoja cada una, con índice),
 figuras/Figura_1..3.png, metodologia.txt, log_articulo.txt y datos_csv/ (las mismas tablas en CSV).
@@ -14,7 +21,11 @@ cambia la configuración. Todo lo no calculable se reporta como "no disponible" 
 import argparse
 import dataclasses
 import datetime
+import hashlib
+import json
 import os
+import shutil
+import subprocess
 import platform
 import sys
 import time
@@ -32,6 +43,9 @@ logger = get_logger('generar_articulo')
 CARPETA = os.path.join('salida', 'articulo')
 CARPETA_FIGURAS = os.path.join(CARPETA, 'figuras')
 CARPETA_CSV = os.path.join(CARPETA, 'datos_csv')
+CARPETA_CANONICA = os.path.join('salida', 'articulo_canonico')
+TOLERANCIA_WMAPE_PP = 0.5
+MODELOS_RESIDUOS = (mb.MODELO_PRODUCCION, mb.MODELO_GBM)
 HORIZONTES = (14, 40, 70, 141)
 MODELOS_HORIZONTE = (mb.MODELO_PRODUCCION, mb.MODELO_GBM, mb.MODELO_GBM_SIN_DISP, mb.MODELO_SBA,
                      mb.nombre_promedio_movil(8))
@@ -58,6 +72,14 @@ class Registro:
     def limitacion(self, m):
         self.limitaciones.append(m)
         self('LIMITACIÓN: ' + m)
+
+
+def usar_carpeta(ruta):
+    """Cambia la carpeta de salida (por defecto salida/articulo)."""
+    global CARPETA, CARPETA_FIGURAS, CARPETA_CSV
+    CARPETA = ruta
+    CARPETA_FIGURAS = os.path.join(ruta, 'figuras')
+    CARPETA_CSV = os.path.join(ruta, 'datos_csv')
 
 
 def _guardar(tablas, nombre, df):
@@ -123,8 +145,14 @@ def main(argv=None):
     ap.add_argument('--bootstrap', type=int, default=pa.N_BOOTSTRAP)
     ap.add_argument('--semilla', type=int, default=pa.SEMILLA)
     ap.add_argument('--rapido', action='store_true', help='Solo horizonte 14 d y sin simulación de compras')
+    ap.add_argument('--congelar', action='store_true',
+                    help='Al terminar, copia la salida a salida/articulo_canonico/ con META.json')
+    ap.add_argument('--muestra-anonima', action='store_true',
+                    help='Genera <salida>/muestra_anonima/ (50 SKU anonimizados) antes del análisis')
+    ap.add_argument('--salida', default=os.path.join('salida', 'articulo'), help='Carpeta de salida')
     args = ap.parse_args(argv)
 
+    usar_carpeta(args.salida)
     os.makedirs(CARPETA, exist_ok=True)
     _preparar_carpeta()
     log = Registro(os.path.join(CARPETA, 'log_articulo.txt'))
@@ -134,6 +162,10 @@ def main(argv=None):
     if not sucursales:
         log('No hay ninguna sucursal con datos. Fin.')
         return 1
+    if args.muestra_anonima:
+        from preve_muestra import generar_muestra_anonima
+        r = generar_muestra_anonima(sucursales[0][1], os.path.join(CARPETA, 'muestra_anonima'), log=log)
+        log(f'Muestra anónima: {r["skus"]} SKU → {r["carpeta"]}')
     pedidos = args.modelos or conf.get('modelos_activos') or list(mb.MODELOS_COMPARABLES)
     validos, desconocidos = mb.validar_modelos(pedidos)
     if desconocidos:
@@ -142,6 +174,7 @@ def main(argv=None):
     from preve_pipeline import construir_panel_y_segmentacion
 
     tablas, meta = {}, {'sucursales': [], 'semilla': args.semilla, 'bootstrap': args.bootstrap}
+    _guardar(tablas, 'Tabla_0_variables', pa.diccionario_variables())
     muestra, censura_sku, detalles, compras, importancias, horiz = [], [], [], [], [], []
     for nombre, carpeta in sucursales:
         log(f'══ Sucursal {nombre} ({carpeta}) ══')
@@ -282,6 +315,16 @@ def main(argv=None):
         _guardar(tablas, 'Datos_detalle_backtesting', detalle[[c for c in (
             'sucursal', 'modelo', 'horizonte_dias', 'periodo_inicio', 'periodo_fin', 'sku', 'clasificacion',
             'clase_abc', 'con_stock', 'pronostico', 'real', 'real_total', 'error_abs', 'bias') if c in detalle]])
+        # Tabla 10 — diagnóstico de residuos
+        mods_res = [m for m in dict.fromkeys(MODELOS_RESIDUOS + (args.propuesto,)) if m in comun['modelo'].unique()]
+        if mods_res:
+            _guardar(tablas, 'Tabla_10_residuos', pa.analisis_residuos(comun, mods_res, semilla=args.semilla).round(4))
+        else:
+            log.limitacion('Diagnóstico de residuos no disponible: faltan los modelos Pipeline / GBM.')
+        # Tabla 12 — intervalos P10/P90 fuera de muestra (M8)
+        oos = pa.intervalos_oos(comun)
+        _guardar(tablas, 'Tabla_12_cobertura_intervalos_oos', pa.cobertura_intervalos(oos).round(3))
+        _guardar(tablas, 'Datos_cuantiles_residuos_sku', pa.cuantiles_residuos_sku(comun).round(4))
 
     # Tabla 6 — importancias
     if importancias:
@@ -294,13 +337,29 @@ def main(argv=None):
     # Tabla 7 — economía
     if compras:
         cv = pd.concat(compras, ignore_index=True)
-        t7 = pd.DataFrame([dict(modelo=m, **pa.resumen_economico(g)) for m, g in cv.groupby('modelo')])
-        t7b = pd.DataFrame([dict(sucursal=s, modelo=m, **pa.resumen_economico(g))
-                            for (s, m), g in cv.groupby(['sucursal', 'modelo'])])
+        base_e0 = cv[cv['modelo'] == pa.BASELINE_EXCESO]
+        if base_e0.empty:
+            log.limitacion(f'Sin simulación de "{pa.BASELINE_EXCESO}": exceso evitado no disponible.')
+        b = base_e0 if len(base_e0) else None
+        t7 = pd.DataFrame([dict(escenario=pa.escenario_de(m), modelo=m, **pa.resumen_economico(g, baseline=b))
+                           for m, g in cv.groupby('modelo')])
+        t7b = pd.DataFrame([dict(sucursal=s, escenario=pa.escenario_de(m), modelo=m, **pa.resumen_economico(
+            g, baseline=None if b is None else b[b['sucursal'] == s]))
+            for (s, m), g in cv.groupby(['sucursal', 'modelo'])])
         _guardar(tablas, 'Tabla_7_simulacion_compras', t7.sort_values('nivel_servicio_pct', ascending=False).round(2))
         _guardar(tablas, 'Tabla_7b_simulacion_por_sucursal', t7b.round(2))
         meta['ciclos'] = int(cv['dia_reporte'].nunique())
     else:
+        cv = None
+    # Tabla 11 — escenarios E0/E1/E2
+    t4 = tablas.get('Tabla_4_comparacion_modelos')
+    if t4 is not None:
+        t11 = pa.tabla_escenarios(t4, cv)
+        _guardar(tablas, 'Tabla_11_escenarios', t11.round(3))
+        faltan = list(t11.loc[t11['wmape'].isna(), 'modelo'])
+        if faltan:
+            log.limitacion(f'Escenarios sin resultados de precisión: {faltan}.')
+    if cv is None:
         log.limitacion('Simulación de compras no disponible (modo rápido o sin días de reporte en el rango).')
 
     # Tabla 8 — horizontes
@@ -323,9 +382,110 @@ def main(argv=None):
             tablas[k].to_excel(xw, sheet_name=k[:31], index=False)
 
     figuras(icd, detalle, tablas, log)
+    if not args.congelar:
+        for aviso in comparar_con_canonico(tablas.get('Tabla_4_comparacion_modelos'), meta):
+            log.limitacion(aviso)
     escribir_metodologia(meta, tablas, log, args, time.time() - t_ini)
     log(f'Listo en {(time.time() - t_ini) / 60:.1f} min → {os.path.abspath(CARPETA)}')
+    if args.congelar:
+        log.f.close()
+        destino = congelar(CARPETA, CARPETA_CANONICA, sucursales, argv, meta)
+        print(f'Corrida canónica congelada en {os.path.abspath(destino)}', flush=True)
+    else:
+        log.f.close()
     return 0
+
+
+# ══════════════════════════════════════════════════════════════════
+# Corrida canónica
+# ══════════════════════════════════════════════════════════════════
+def sha256(ruta, bloque=1 << 20):
+    h = hashlib.sha256()
+    with open(ruta, 'rb') as f:
+        for b in iter(lambda: f.read(bloque), b''):
+            h.update(b)
+    return h.hexdigest()
+
+
+def hashes_entrada(sucursales):
+    """{sucursal: {tipo: [{archivo, sha256, bytes}]}} de los 4 reportes del ERP de cada sucursal."""
+    from preve_pipeline import _clasificar_archivos
+    out = {}
+    for nombre, carpeta in sucursales:
+        clasif, _ = _clasificar_archivos(carpeta)
+        out[nombre] = {tipo: [{'archivo': os.path.relpath(a, carpeta), 'sha256': sha256(a),
+                               'bytes': os.path.getsize(a)} for a in sorted(archivos)]
+                       for tipo, archivos in clasif.items()}
+    return out
+
+
+def _ejecutar(cmd):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def metadatos(sucursales, argv=None, meta=None):
+    """Contenido de META.json."""
+    freeze = _ejecutar([sys.executable, '-m', 'pip', 'freeze'])
+    commit = _ejecutar(['git', 'rev-parse', 'HEAD'])
+    sucio = _ejecutar(['git', 'status', '--porcelain', '--untracked-files=no'])
+    args_cmd = sys.argv[1:] if argv is None else list(argv)
+    return {'fecha_ejecucion': datetime.datetime.now().isoformat(timespec='seconds'),
+            'python': sys.version, 'plataforma': platform.platform(),
+            'librerias': freeze.splitlines() if freeze else None,
+            'comando': ' '.join(['python', os.path.basename(__file__)] + args_cmd),
+            'git_commit': commit, 'git_cambios_sin_commit': bool(sucio) if sucio is not None else None,
+            'sucursales': [n for n, _ in sucursales],
+            'semilla': (meta or {}).get('semilla'), 'bootstrap': (meta or {}).get('bootstrap'),
+            'archivos_entrada': hashes_entrada(sucursales)}
+
+
+def congelar(origen, destino, sucursales, argv=None, meta=None):
+    """Copia `origen` completo a `destino` (reemplazándolo) y escribe destino/META.json."""
+    if os.path.abspath(origen) == os.path.abspath(destino):
+        raise ValueError('La carpeta canónica no puede ser la misma que la de salida.')
+    shutil.rmtree(destino, ignore_errors=True)
+    shutil.copytree(origen, destino)
+    with open(os.path.join(destino, 'META.json'), 'w', encoding='utf-8') as f:
+        json.dump(metadatos(sucursales, argv, meta), f, ensure_ascii=False, indent=2, default=str)
+    return destino
+
+
+def comparar_con_canonico(t4, meta=None, carpeta=None, tolerancia=TOLERANCIA_WMAPE_PP):
+    """Avisos (lista de textos) si el WMAPE de la Tabla 4 difiere del canónico en más de `tolerancia` pp.
+
+    Solo compara si la corrida canónica existe y es de las mismas sucursales. Un modelo que está en una sola
+    de las dos corridas también se avisa."""
+    carpeta = carpeta or CARPETA_CANONICA
+    ruta = os.path.join(carpeta, 'datos_csv', 'Tabla_4_comparacion_modelos.csv')
+    if t4 is None or not os.path.exists(ruta):
+        return []
+    try:
+        with open(os.path.join(carpeta, 'META.json'), encoding='utf-8') as f:
+            suc_can = json.load(f).get('sucursales')
+    except (OSError, ValueError):
+        suc_can = None
+    suc_act = [s['sucursal'] for s in (meta or {}).get('sucursales', [])]
+    if suc_can is not None and meta is not None and sorted(suc_can) != sorted(suc_act):
+        return []
+    can = pd.read_csv(ruta, encoding='utf-8-sig').set_index('modelo')['wmape']
+    act = t4.set_index('modelo')['wmape']
+    avisos = []
+    for m in sorted(set(can.index) | set(act.index)):
+        if m not in act.index or m not in can.index:
+            avisos.append(f'WARNING: "{m}" está solo en la corrida {"canónica" if m in can.index else "actual"}.')
+            continue
+        d = float(act[m]) - float(can[m])
+        if abs(d) > tolerancia:
+            avisos.append(f'WARNING: WMAPE de "{m}" difiere del canónico en {d:+.2f} pp '
+                          f'({float(act[m]):.2f} vs {float(can[m]):.2f}); el artículo cita salida/articulo_canonico/.')
+    if avisos:
+        logger.warning('Diferencias con la corrida canónica: %s', avisos)
+    return avisos
 
 
 def figuras(icd, detalle, tablas, log):
@@ -394,7 +554,18 @@ def escribir_metodologia(meta, tablas, log, args, segundos):
           f'  · Modelo propuesto: {args.propuesto}. Ablación: "{mb.MODELO_GBM}" vs "{mb.MODELO_GBM_SIN_DISP}" '
           '(mismo modelo y datos; única diferencia: variables de disponibilidad av4, av13, av26 y stock).',
           f'  · Sensibilidad al horizonte: {", ".join(map(str, args.horizontes))} días, modelos: '
-          f'{", ".join(MODELOS_HORIZONTE)}.', '', '3. MODELOS Y PARÁMETROS']
+          f'{", ".join(MODELOS_HORIZONTE)}.',
+          '  · Residuos (Tabla 10): e = pronóstico − real. Shapiro-Wilk sobre el residuo medio por ventana (y sobre '
+          'los residuos SKU×ventana, submuestra ≤ 5000); Ljung-Box (statsmodels) sobre el residuo medio por ventana '
+          'con lag = mín(10, n_ventanas/2).',
+          '  · Intervalos P10/P90 fuera de muestra (Tabla 12): r = real − pronóstico; P10 = pronóstico + q10(r), '
+          'P90 = pronóstico + q90(r), con los residuos del mismo modelo y SKU en ventanas ANTERIORES (≥ 3; si no, '
+          'los de la misma clase ABC). Se compara su cobertura con la del intervalo paramétrico de cada modelo.',
+          '  · Escenarios (Tabla 11): ' + '; '.join(f'{e} = {m}' for e, (m, _) in pa.ESCENARIOS.items())
+          + '. Mejora = 100 × (WMAPE_E0 − WMAPE_E2) / WMAPE_E0. La economía de la Tabla 11 se calcula sobre la '
+          'base común (sucursal, SKU, día de reporte) de los tres modelos.',
+          '  · Variables y notación: Tabla 0. Política de compras formal: formulacion_compras.md.',
+          '', '3. MODELOS Y PARÁMETROS']
     if meta['sucursales']:
         p = meta['sucursales'][0]['params']
         L.append('  · Modelos evaluados: ' + ', '.join(meta['sucursales'][0]['modelos']))

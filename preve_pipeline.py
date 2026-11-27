@@ -1166,8 +1166,12 @@ def calcular_recomendacion(pronostico, segmentacion, dim, stock, panel_full, fec
         df['decision'] = np.where(df['es_compra'], 'COMPRAR', 'NO COMPRAR')
         df = df.drop(columns='es_compra')
     else:
-        acciones = df.apply(_clasificar_accion, axis=1, result_type='expand')
-        acciones.columns = ['accion', 'motivo_accion']
+        if len(df):
+            acciones = df.apply(_clasificar_accion, axis=1, result_type='expand')
+            acciones.columns = ['accion', 'motivo_accion']
+        else:   # pronóstico vacío: apply(expand) devuelve las columnas de df y la asignación fallaba
+            acciones = pd.DataFrame({'accion': pd.Series(dtype=object),
+                                     'motivo_accion': pd.Series(dtype=object)}, index=df.index)
         df = pd.concat([df, acciones], axis=1)
         df['decision'] = np.where(df['accion'] == 'RECOMPRAR', 'COMPRAR', 'NO COMPRAR')
 

@@ -11,3 +11,5 @@ reportlab
 matplotlib
 playwright
 python-dotenv
+statsmodels
+scipy

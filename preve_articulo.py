@@ -36,7 +36,22 @@ SUPUESTOS_VALORIZACION = [
     'SKU sin costo o sin precio en el catálogo: valor "no disponible"; no se imputa y se reporta su número.',
     'Horizonte incompleto al final de los datos: la venta real se extrapola proporcionalmente (lo marca '
     'Backtester.simular_compra como horizonte parcial).',
+    'Exceso evitado (S/.): exceso_evitado = exceso_baseline − exceso_propuesto, con baseline = Naive (E0, el '
+    'comprador sin sistema). Se calcula sobre la base común (sucursal, SKU, día de reporte) que ambos modelos '
+    'simularon y que tiene valorización disponible; > 0 significa capital inmovilizado que el modelo evita frente '
+    'a Naive. No es el sobre-stock existente de los productos REDUCIR/LIQUIDAR (ítem M10 de AUDITORIA.md).',
 ]
+
+# Escenarios de la plantilla del artículo (E0 sin sistema, E1 ML sin la innovación, E2 modelo completo)
+ESCENARIO_BASE = 'E0'
+ESCENARIOS = {
+    'E0': ('Naive', 'Base: sin sistema (repite la venta de la última semana × horizonte/7)'),
+    'E1': ('GBM sin disponibilidad', 'Propuesto sin innovación: GBM estándar sin variables de censura'),
+    'E2': ('Pipeline (producción)', 'Propuesto con innovación: modelo completo con ICD y variables de disponibilidad'),
+}
+BASELINE_EXCESO = ESCENARIOS['E0'][0]
+CUANTIL_INF, CUANTIL_SUP = 0.10, 0.90
+MIN_RESIDUOS_SKU = 3
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -67,10 +82,40 @@ def valorizar_compras(compras, dim, igv_factor=1.18, log=lambda m: None):
     return c
 
 
-def resumen_economico(c):
-    """Una fila con los indicadores de compras de un conjunto de compras valorizadas."""
+def resumen_economico(c, baseline=None):
+    """Una fila con los indicadores de compras de un conjunto de compras valorizadas.
+
+    baseline: compras valorizadas del modelo de referencia (Naive = E0). Si se pasa, agrega
+    exceso_evitado_pen = exceso_baseline − exceso_propuesto (ver exceso_evitado; M10).
+    """
     dem = float(c['demanda_obs'].sum())
     val = c[c['valorizacion_disponible']]
+    extra = {} if baseline is None else {'exceso_evitado_pen': exceso_evitado(c, baseline)['exceso_evitado_pen']}
+    return {**_resumen_economico(c, dem, val), **extra}
+
+
+_CLAVE_COMPRA = ['sucursal', 'sku', 'dia_reporte']
+
+
+def _clave(c):
+    return [k for k in _CLAVE_COMPRA if k in c.columns]
+
+
+def exceso_evitado(propuesto, baseline):
+    """exceso_evitado = exceso_baseline − exceso_propuesto (S/.), sobre la base común (sucursal, SKU, día de
+    reporte) que ambos simularon con valorización disponible. Devuelve dict con exceso_baseline_pen,
+    exceso_propuesto_pen, exceso_evitado_pen y filas_base_comun."""
+    k = _clave(propuesto)
+    a = propuesto.loc[propuesto['valorizacion_disponible'], k + ['exceso_pen']]
+    b = baseline.loc[baseline['valorizacion_disponible'], k + ['exceso_pen']]
+    m = a.groupby(k)['exceso_pen'].sum().to_frame('p').join(b.groupby(k)['exceso_pen'].sum().rename('b'),
+                                                             how='inner')
+    eb, ep = float(m['b'].sum()), float(m['p'].sum())
+    return {'exceso_baseline_pen': eb, 'exceso_propuesto_pen': ep, 'exceso_evitado_pen': eb - ep,
+            'filas_base_comun': int(len(m))}
+
+
+def _resumen_economico(c, dem, val):
     return {'nivel_servicio_pct': float(c['atendido'].sum() / dem * 100) if dem > 0 else np.nan,
             'unidades_compradas': float(c['compra_sugerida_unid'].sum()),
             'exceso_unid': float(c['sobrante'].sum()), 'exceso_pen': float(val['exceso_pen'].sum()),
@@ -197,6 +242,254 @@ def evaluar_modelo(datos, nombre, fecha_inicio, fecha_fin, params, horizonte_dia
         comp = valorizar_compras(r['compras'], datos.dim, getattr(params, 'igv_factor', 1.18), log).assign(
             modelo=nombre, sucursal=sucursal)
     return det, comp
+
+
+# ══════════════════════════════════════════════════════════════════
+# Diagnóstico de residuos (Tabla 10)
+# ══════════════════════════════════════════════════════════════════
+def analisis_residuos(detalle, modelos, semilla=SEMILLA, max_shapiro=5000):
+    """Residuos e = pronóstico − real de cada modelo.
+
+    · shapiro_w / shapiro_p: Shapiro-Wilk sobre el residuo MEDIO por ventana (una observación por ventana).
+    · shapiro_w_obs / shapiro_p_obs: Shapiro-Wilk sobre los residuos SKU×ventana (submuestra de ≤ 5000 con
+      semilla fija; scipy no garantiza el p-valor por encima de ese tamaño).
+    · ljung_box_Q / ljung_box_p: Ljung-Box sobre el residuo medio por ventana (orden temporal), con
+      lag = mín(10, n_ventanas // 2) (≥ 1).
+    · media, mediana, asimetría y curtosis (exceso de Fisher) de los residuos SKU×ventana.
+    """
+    from scipy import stats
+    filas = []
+    rng = np.random.default_rng(semilla)
+    for m in modelos:
+        g = detalle[detalle['modelo'] == m]
+        if g.empty:
+            continue
+        e = (g['pronostico'] - g['real']).astype(float)
+        r = e.to_numpy()
+        r = r[np.isfinite(r)]
+        pv = e.groupby(g['periodo_inicio']).mean().sort_index().dropna().to_numpy()
+        n_v = len(pv)
+        sw = (stats.shapiro(pv) if n_v >= 3 and np.ptp(pv) > 0 else (np.nan, np.nan))
+        mu = r if len(r) <= max_shapiro else rng.choice(r, max_shapiro, replace=False)
+        sw_obs = stats.shapiro(mu) if len(mu) >= 3 and np.ptp(mu) > 0 else (np.nan, np.nan)
+        lag = max(1, min(10, n_v // 2))
+        q, p_lb = np.nan, np.nan
+        if n_v >= 3 and np.ptp(pv) > 0:
+            try:
+                from statsmodels.stats.diagnostic import acorr_ljungbox
+                lb = acorr_ljungbox(pv, lags=[lag], return_df=True)
+                q, p_lb = float(lb['lb_stat'].iloc[0]), float(lb['lb_pvalue'].iloc[0])
+            except Exception as ex:  # noqa: BLE001 — serie demasiado corta o degenerada
+                logger.info('Ljung-Box no evaluable para %s: %s', m, ex)
+        filas.append({'modelo': m, 'shapiro_w': float(sw[0]), 'shapiro_p': float(sw[1]),
+                      'shapiro_w_obs': float(sw_obs[0]), 'shapiro_p_obs': float(sw_obs[1]),
+                      'ljung_box_Q': q, 'ljung_box_p': p_lb, 'ljung_box_lag': lag,
+                      'media_residuos': float(np.mean(r)) if len(r) else np.nan,
+                      'mediana_residuos': float(np.median(r)) if len(r) else np.nan,
+                      'asimetria': float(stats.skew(r)) if len(r) > 2 else np.nan,
+                      'curtosis': float(stats.kurtosis(r)) if len(r) > 3 else np.nan,
+                      'n_observaciones': int(len(r)), 'n_ventanas': int(n_v)})
+    return pd.DataFrame(filas)
+
+
+# ══════════════════════════════════════════════════════════════════
+# Intervalos P10/P90 fuera de muestra (M8)
+# ══════════════════════════════════════════════════════════════════
+def intervalos_oos(detalle, q_inf=CUANTIL_INF, q_sup=CUANTIL_SUP, min_obs=MIN_RESIDUOS_SKU):
+    """Intervalos empíricos fuera de muestra a partir de los residuos del backtesting.
+
+    Residuo r = real − pronóstico (así P10 = pronóstico + q10(r) es la cota inferior; equivale a
+    pronóstico − q90(pronóstico − real)). Para la fila (modelo, SKU, ventana t) se usan SOLO los residuos del
+    mismo modelo y SKU en ventanas anteriores a t (ventana expansiva: ninguna fila ve su propio error).
+    Con menos de `min_obs` residuos propios se usan los de todos los SKU de la misma clase ABC en ventanas
+    anteriores; sin ninguno, el intervalo queda NaN (no se imputa).
+    Agrega p10_oos, p90_oos (p10 ≥ 0), n_residuos y fuente_intervalo ('sku' / 'clase_abc' / 'sin historia').
+    """
+    out = []
+    d = detalle.copy()
+    d['_r'] = d['real'].astype(float) - d['pronostico'].astype(float)
+    if 'clase_abc' not in d.columns:
+        d['clase_abc'] = 'Total'
+    for _, g in d.groupby('modelo', sort=False):
+        g = g.copy()
+        ventanas = np.sort(g['periodo_inicio'].unique())
+        g['_j'] = g['periodo_inicio'].map({v: i for i, v in enumerate(ventanas)})
+        M = g.pivot_table(index='sku', columns='_j', values='_r', aggfunc='mean').reindex(
+            columns=range(len(ventanas)))
+        lo = np.full(len(g), np.nan)
+        hi = np.full(len(g), np.nan)
+        n = np.zeros(len(g), dtype=int)
+        fuente = np.array(['sin historia'] * len(g), dtype=object)
+        pos_sku = {s: i for i, s in enumerate(M.index)}
+        A = M.to_numpy()
+        gi = g.reset_index(drop=True)
+        for j in range(1, len(ventanas)):
+            filas_j = np.flatnonzero(gi['_j'].to_numpy() == j)
+            if not len(filas_j):
+                continue
+            prev = A[:, :j]
+            cnt = np.sum(np.isfinite(prev), axis=1)
+            with np.errstate(all='ignore'):
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    ql = np.nanquantile(prev, q_inf, axis=1)
+                    qh = np.nanquantile(prev, q_sup, axis=1)
+            previas = gi[gi['_j'] < j]
+            pool = {k: v['_r'].to_numpy() for k, v in previas.groupby('clase_abc')}
+            for f in filas_j:
+                i = pos_sku[gi.at[f, 'sku']]
+                if cnt[i] >= min_obs:
+                    lo[f], hi[f], n[f], fuente[f] = ql[i], qh[i], cnt[i], 'sku'
+                else:
+                    p = pool.get(gi.at[f, 'clase_abc'])
+                    if p is not None and len(p) >= min_obs:
+                        lo[f], hi[f] = np.quantile(p, q_inf), np.quantile(p, q_sup)
+                        n[f], fuente[f] = len(p), 'clase_abc'
+        gi['p10_oos'] = np.clip(gi['pronostico'].to_numpy() + lo, 0, None)
+        gi['p90_oos'] = gi['pronostico'].to_numpy() + hi
+        gi['n_residuos'] = n
+        gi['fuente_intervalo'] = fuente
+        out.append(gi.drop(columns=['_j']))
+    return pd.concat(out, ignore_index=True).drop(columns=['_r']) if out else d.drop(columns=['_r'])
+
+
+def cobertura_intervalos(d, nominal=(CUANTIL_SUP - CUANTIL_INF) * 100):
+    """Cobertura empírica por modelo del intervalo OOS y del intervalo propio del modelo (demanda_p10/p90,
+    paramétrico) sobre las MISMAS filas (las que tienen intervalo OOS)."""
+    filas = []
+    for m, g in d.groupby('modelo'):
+        g = g[g['p10_oos'].notna() & g['p90_oos'].notna()]
+        if g.empty:
+            continue
+        real = g['real'].to_numpy(float)
+        dentro = (real >= g['p10_oos']) & (real <= g['p90_oos'])
+        fila = {'modelo': m, 'nominal_pct': nominal, 'filas': int(len(g)),
+                'cobertura_oos_pct': float(dentro.mean() * 100),
+                'cobertura_p90_oos_pct': float((real <= g['p90_oos']).mean() * 100),
+                'ancho_medio_oos': float((g['p90_oos'] - g['p10_oos']).mean()),
+                'pct_filas_fuente_sku': float((g['fuente_intervalo'] == 'sku').mean() * 100)}
+        if {'demanda_p10_141d', 'demanda_p90_141d'} <= set(g.columns):
+            p10, p90 = g['demanda_p10_141d'].astype(float), g['demanda_p90_141d'].astype(float)
+            fila.update({'cobertura_modelo_pct': float(((real >= p10) & (real <= p90)).mean() * 100),
+                         'cobertura_p90_modelo_pct': float((real <= p90).mean() * 100),
+                         'ancho_medio_modelo': float((p90 - p10).mean())})
+        filas.append(fila)
+    return pd.DataFrame(filas)
+
+
+def cuantiles_residuos_sku(detalle, q_inf=CUANTIL_INF, q_sup=CUANTIL_SUP):
+    """Para aplicar a un pronóstico NUEVO: por (modelo, SKU), cuantiles de r = real − pronóstico sobre TODAS
+    las ventanas del backtesting. P10 = pronóstico + q_inf, P90 = pronóstico + q_sup."""
+    d = detalle.assign(_r=detalle['real'].astype(float) - detalle['pronostico'].astype(float))
+    g = d.groupby(['modelo', 'sku'])['_r']
+    return pd.DataFrame({'q_inf': g.quantile(q_inf), 'q_sup': g.quantile(q_sup), 'n_residuos': g.count()}
+                        ).reset_index()
+
+
+# ══════════════════════════════════════════════════════════════════
+# Escenarios E0/E1/E2 (Tabla 11)
+# ══════════════════════════════════════════════════════════════════
+def escenario_de(modelo, escenarios=ESCENARIOS):
+    """'E0'/'E1'/'E2' del modelo, o '' si no es uno de los tres."""
+    return next((e for e, (m, _) in escenarios.items() if m == modelo), '')
+
+
+def tabla_escenarios(t4, compras=None, escenarios=ESCENARIOS):
+    """Resumen E0/E1/E2: precisión (Tabla 4) + economía de la simulación de compras.
+
+    La economía se recalcula sobre la base común (sucursal, SKU, día de reporte) que los TRES modelos
+    simularon, para que las cifras en S/. sean comparables entre escenarios.
+    mejora_wmape_vs_E0_pct = 100 × (WMAPE_E0 − WMAPE_Ex) / WMAPE_E0.
+    """
+    t4 = t4.set_index('modelo')
+    base = escenarios[ESCENARIO_BASE][0]
+    w0 = float(t4.loc[base, 'wmape']) if base in t4.index else np.nan
+    comunes, cv = None, None
+    if compras is not None and len(compras):
+        cv = compras[compras['modelo'].isin([m for m, _ in escenarios.values()])]
+        n_mod = cv['modelo'].nunique()
+        if n_mod and base in set(cv['modelo']):          # base común de los escenarios que se simularon
+            comunes = cv.groupby(_clave(cv))['modelo'].transform('nunique') == n_mod
+    filas = []
+    for e, (m, desc) in escenarios.items():
+        f = {'escenario': e, 'modelo': m, 'descripcion': desc}
+        for c in ('wmape', 'ic_inf', 'ic_sup'):
+            f[c] = float(t4.loc[m, c]) if m in t4.index else np.nan
+        f['mejora_wmape_vs_E0_pct'] = 100 * (w0 - f['wmape']) / w0 if w0 and np.isfinite(w0) else np.nan
+        if comunes is not None and m in set(cv['modelo']):
+            c = cv[comunes & (cv['modelo'] == m)]
+            r = resumen_economico(c)
+            b = cv[comunes & (cv['modelo'] == base)]
+            f.update({'nivel_servicio_pct': r['nivel_servicio_pct'], 'exceso_pen': r['exceso_pen'],
+                      'venta_perdida_pen': r['venta_perdida_pen'], 'inversion_pen': r['inversion_pen'],
+                      'exceso_evitado_pen': exceso_evitado(c, b)['exceso_evitado_pen'],
+                      'skus_base_comun': int(c['sku'].nunique()), 'filas_base_comun': int(len(c))})
+        else:
+            f.update({k: np.nan for k in ('nivel_servicio_pct', 'exceso_pen', 'venta_perdida_pen',
+                                          'inversion_pen', 'exceso_evitado_pen')})
+        filas.append(f)
+    return pd.DataFrame(filas)
+
+
+# ══════════════════════════════════════════════════════════════════
+# Diccionario de variables (Tabla 0)
+# ══════════════════════════════════════════════════════════════════
+VARIABLES = [
+    # simbolo, nombre, tipo, unidad, fuente
+    ('i', 'Índice de producto (SKU)', 'categórica', 'adimensional', 'catálogo'),
+    ('t', 'Índice de semana (lunes a domingo)', 'discreta', 'semanas', 'calculada'),
+    ('d_{i,t}', 'Demanda observada: venta neta del SKU i en la semana t', 'discreta', 'unidades', 'ventas'),
+    ('d^*_{i,t}', 'Demanda latente (no censurada por quiebres de stock); no observable', 'continua', 'unidades',
+     'calculada'),
+    ('\\hat{d}_{i,t}', 'Pronóstico puntual (P50) de la demanda del horizonte', 'continua', 'unidades', 'calculada'),
+    ('\\hat{d}^{P10}_{i}, \\hat{d}^{P90}_{i}', 'Cuantiles 10 y 90 del pronóstico del horizonte', 'continua',
+     'unidades', 'calculada'),
+    ('s_{i,t}', 'Stock al cierre del día, reconstruido hacia atrás desde el catálogo', 'continua', 'unidades',
+     'calculada'),
+    ('a_{i,t}', 'Disponibilidad: 1 si s_{i,t} > 0 (día con stock), 0 si no', 'binaria', 'adimensional',
+     'calculada'),
+    ('av_k', 'Media móvil de la disponibilidad semanal en las últimas k semanas (k = 4, 13, 26)', 'continua',
+     'adimensional', 'calculada'),
+    ('c_{i,t}', 'Semana censurada: d_{i,t} = 0 y disponibilidad < 50 % de los días', 'binaria', 'adimensional',
+     'calculada'),
+    ('ICD_i', 'Índice de Ceguera de Demanda = semanas censuradas / semanas sin venta', 'continua',
+     'adimensional', 'calculada'),
+    ('ADI_i', 'Intervalo medio entre demandas (Syntetos-Boylan)', 'continua', 'semanas', 'calculada'),
+    ('CV^2_i', 'Coeficiente de variación al cuadrado de las demandas no nulas', 'continua', 'adimensional',
+     'calculada'),
+    ('ABC_i', 'Clase ABC por margen acumulado (A ≤ 80 %, B ≤ 95 %, C resto)', 'categórica', 'adimensional', 'calculada'),
+    ('c^{u}_i', 'Costo unitario (PRECIO COMPRA)', 'continua', 'S/.', 'catálogo'),
+    ('p_i', 'Precio de venta unitario con IGV (PRECIO VENTA)', 'continua', 'S/.', 'catálogo'),
+    ('m_i', 'Margen unitario = p_i / factor IGV − c^{u}_i', 'continua', 'S/.', 'calculada'),
+    ('q^{tr}_i', 'Stock en tránsito (órdenes abiertas)', 'continua', 'unidades', 'compras'),
+    ('\\sigma_i', 'Desvío de la demanda del horizonte = (P90 − P50) / 1,2816', 'continua', 'unidades', 'calculada'),
+    ('SS_i', 'Stock de seguridad = z_i · σ_i', 'continua', 'unidades', 'calculada'),
+    ('R_i', 'Punto de reorden = \\hat{d}_i · L/H + SS_i · √(mín(1, L/H))', 'continua', 'unidades', 'calculada'),
+    ('S_i', 'Nivel objetivo = \\hat{d}_i + SS_i', 'continua', 'unidades', 'calculada'),
+    ('Q_i', 'Cantidad a pedir = máx(0, S_i − s_i − q^{tr}_i), redondeada', 'discreta', 'unidades', 'calculada'),
+    ('H', 'Horizonte de pronóstico (revisión + lead time)', 'discreta', 'días', 'parámetro'),
+    ('L', 'Lead time del proveedor', 'discreta', 'días', 'parámetro'),
+    ('C', 'Ciclo de compra (días entre revisiones / pedidos)', 'discreta', 'días', 'parámetro'),
+    ('z_i', 'Factor de servicio según clase ABC (A 1,645; B 1,2816; C 1,0364 por defecto)', 'continua',
+     'adimensional', 'parámetro'),
+    ('\\alpha_i', 'Nivel de servicio objetivo = Φ(z_i)', 'continua', 'adimensional', 'parámetro'),
+    ('WMAPE', 'Σ|\\hat{d} − d| / Σ d × 100', 'continua', '%', 'calculada'),
+    ('MAE', 'Error absoluto medio', 'continua', 'unidades', 'calculada'),
+    ('RMSE', 'Raíz del error cuadrático medio', 'continua', 'unidades', 'calculada'),
+    ('Bias', 'Sesgo medio = media(\\hat{d} − d)', 'continua', 'unidades', 'calculada'),
+    ('MASE', 'MAE del modelo / MAE del naive (venta real de la ventana anterior del SKU)', 'continua', 'adimensional',
+     'calculada'),
+    ('NS', 'Nivel de servicio = Σ mín(d, s + Q) / Σ d × 100', 'continua', '%', 'calculada'),
+    ('E', 'Exceso de inventario = máx(0, s + Q − d) × c^{u}', 'continua', 'S/.', 'calculada'),
+    ('VP', 'Venta perdida = máx(0, d − s − Q) × m', 'continua', 'S/.', 'calculada'),
+    ('EE', 'Exceso evitado = E_{Naive} − E_{modelo} (base común)', 'continua', 'S/.', 'calculada'),
+]
+
+
+def diccionario_variables():
+    """Tabla 0: símbolo, nombre, tipo, unidad y fuente de cada variable del artículo."""
+    return pd.DataFrame(VARIABLES, columns=['simbolo', 'nombre', 'tipo', 'unidad', 'fuente'])
 
 
 class _SinBase:

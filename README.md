@@ -59,6 +59,8 @@ python scripts/migrar_a_sqlite.py # opcional: --con-ventas importa también las 
 python preve_app.py
 ```
 
+Para reproducir exactamente: `pip install -r requirements-lock.txt` (versiones fijadas con las que se generó la corrida canónica del artículo; `requirements.txt` solo tiene las versiones mínimas).
+
 La primera vez se abre un **asistente de 6 pantallas**: empresa, sucursales y sus almacenes, ciclos de compra, frecuencia de análisis, columnas del Excel de ventas y plantilla de categorías. Todo se puede editar después en *Configuración*.
 
 ### Credenciales y URLs del ERP
@@ -93,6 +95,26 @@ salida/                                    ← resultados
 ```
 
 Los cuadros y figuras del artículo (botón *📊 Cuadros y figuras del artículo* en Inicio) quedan en `salida/articulo/`: `tablas_articulo.xlsx` (todas las tablas, una hoja cada una, con índice), `figuras/`, `metodologia.txt` y `datos_csv/`.
+
+### Resultados del artículo (reproducibilidad)
+
+```bash
+pip install -r requirements-lock.txt
+python generar_resultados_articulo.py --congelar          # corrida canónica → salida/articulo_canonico/ + META.json
+python generar_resultados_articulo.py --muestra-anonima   # además escribe salida/articulo/muestra_anonima/ (50 SKU)
+python generar_resultados_articulo.py --sucursal Muestra --entrada salida/articulo/muestra_anonima/erp --salida salida/articulo_muestra
+```
+
+- **El artículo cita siempre `salida/articulo_canonico/`.** Su `META.json` registra la fecha, la versión de Python, el `pip freeze`, el SHA-256 de cada reporte de entrada, el comando exacto y el commit de git.
+- Cualquier corrida sin `--congelar` compara el WMAPE de la Tabla 4 con la canónica y escribe un **WARNING** en el log y en `metodologia.txt` si alguno difiere en más de 0,5 pp.
+- Tablas nuevas:
+  - Tabla 0: diccionario de variables.
+  - Tabla 10: residuos (Shapiro-Wilk y Ljung-Box).
+  - Tabla 11: escenarios E0 Naive / E1 GBM sin disponibilidad / E2 Pipeline.
+  - Tabla 12: cobertura de los intervalos P10/P90 fuera de muestra.
+  - Tabla 7: suma las columnas `escenario` y `exceso_evitado_pen` (= exceso de Naive − exceso del modelo).
+- La regla de compra en notación formal está en [`formulacion_compras.md`](formulacion_compras.md).
+- La muestra anónima (`README_muestra.md` dentro de la carpeta) trae los 4 reportes del ERP de 50 SKU al azar, en el mismo formato del ERP. Los códigos y nombres se reemplazan por `SKU_001…` y los importes se escalan. Así se puede ejecutar todo el análisis sin acceder a los datos reales.
 
 La app lee siempre el período más reciente (*Inicio → Abrir carpeta de resultados* lo abre). El estado del ciclo vive en la base de datos. «Reiniciar PREVÉ» (Configuración) borra, entre otras cosas, solo las subcarpetas de período de la salida (con respaldo ZIP previo); nunca toca `ordenes_compra_abiertas.csv`. Los archivos sueltos de versiones anteriores no se mueven ni se borran.
 
